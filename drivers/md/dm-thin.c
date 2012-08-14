@@ -2391,8 +2391,10 @@ static void set_discard_limits(struct pool *pool, struct block_device *src_bdev,
 	limits->discard_zeroes_data = pool->pf.zero_new_blocks;
 	limits->max_discard_sectors = pool->sectors_per_block;
 
-	if (!pool->pf.discard_passdown)
-		goto set_granularity_no_passdown;
+	if (!pool->pf.discard_passdown) {
+		set_discard_granularity_no_passdown(pool, limits);
+		return;
+	}
 
 	/*
 	 * discard passdown forces the need to establish a
@@ -2409,7 +2411,8 @@ static void set_discard_limits(struct pool *pool, struct block_device *src_bdev,
 		       (limits->max_discard_sectors << SECTOR_SHIFT),
 		       limits->discard_granularity);
 		pool->pf.discard_passdown = 0;
-		goto set_granularity_no_passdown;
+		set_discard_granularity_no_passdown(pool, limits);
+		return;
 	}
 
 	/*
@@ -2423,11 +2426,8 @@ static void set_discard_limits(struct pool *pool, struct block_device *src_bdev,
 		       (src_limits->max_discard_sectors << SECTOR_SHIFT),
 		       pool->sectors_per_block);
 		pool->pf.discard_passdown = 0;
-		/* fall through to call set_discard_granularity_no_passdown */
+		set_discard_granularity_no_passdown(pool, limits);
 	}
-
-set_granularity_no_passdown:
-	set_discard_granularity_no_passdown(pool, limits);
 }
 
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
