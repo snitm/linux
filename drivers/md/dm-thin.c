@@ -2363,6 +2363,21 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
+static void set_discard_granularity_no_passdown(struct pool *pool,
+						struct queue_limits *limits)
+{
+	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
+	if (pool->sectors_per_block_shift < 0) {
+		/*
+		 * Block size is not a power of 2 but the block layer assumes
+		 * discard_granularity is.  Leverage the fact that block size
+		 * is a multiple of DATA_DEV_BLOCK_SIZE_MIN_SECTORS.
+		 */
+		limits->discard_granularity =
+			DATA_DEV_BLOCK_SIZE_MIN_SECTORS << SECTOR_SHIFT;
+	}
+}
+
 static void set_discard_limits(struct pool *pool, struct block_device *src_bdev,
 			       struct queue_limits *limits)
 {
@@ -2373,23 +2388,11 @@ static void set_discard_limits(struct pool *pool, struct block_device *src_bdev,
 	 * We have to cope with discard bios that cover a block partially.
 	 * But a discard that spans a block boundary is not sent to this target.
 	 */
-restart:
 	limits->discard_zeroes_data = pool->pf.zero_new_blocks;
 	limits->max_discard_sectors = pool->sectors_per_block;
 
-	if (!pool->pf.discard_passdown) {
-		limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
-		if (pool->sectors_per_block_shift < 0) {
-			/*
-			 * Block size is not a power of 2 but the block layer assumes
-			 * discard_granularity is.  Leverage the fact that block size
-			 * is a multiple of DATA_DEV_BLOCK_SIZE_MIN_SECTORS.
-			 */
-			limits->discard_granularity =
-				DATA_DEV_BLOCK_SIZE_MIN_SECTORS << SECTOR_SHIFT;
-		}
-		return;
-	}
+	if (!pool->pf.discard_passdown)
+		goto set_granularity_no_passdown;
 
 	/*
 	 * discard passdown forces the need to establish a
@@ -2406,7 +2409,7 @@ restart:
 		       (limits->max_discard_sectors << SECTOR_SHIFT),
 		       limits->discard_granularity);
 		pool->pf.discard_passdown = 0;
-		goto restart;
+		goto set_granularity_no_passdown;
 	}
 
 	/*
@@ -2420,8 +2423,11 @@ restart:
 		       (src_limits->max_discard_sectors << SECTOR_SHIFT),
 		       pool->sectors_per_block);
 		pool->pf.discard_passdown = 0;
-		goto restart;
+		/* fall through to call set_discard_granularity_no_passdown */
 	}
+
+set_granularity_no_passdown:
+	set_discard_granularity_no_passdown(pool, limits);
 }
 
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
