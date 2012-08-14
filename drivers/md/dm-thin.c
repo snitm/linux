@@ -2366,6 +2366,11 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 static void set_discard_limits(struct pool *pool, struct block_device *src_bdev,
 			       struct queue_limits *limits)
 {
+	struct request_queue *q = bdev_get_queue(src_bdev);
+	struct queue_limits *src_limits = &q->limits;
+
+	limits->discard_zeroes_data = pool->pf.zero_new_blocks;
+
 	/*
 	 * We have to cope with discard bios that cover a block partially.
 	 * But a discard that spans a block boundary is not sent to this target.
@@ -2383,38 +2388,35 @@ restart:
 			limits->discard_granularity =
 				DATA_DEV_BLOCK_SIZE_MIN_SECTORS << SECTOR_SHIFT;
 		}
-	} else {
-		struct request_queue *q = bdev_get_queue(src_bdev);
-		struct queue_limits *src_limits = &q->limits;
-
-		/*
-		 * If discard passdown is enabled we cannot support discards
-		 * that are larger than supported by the underlying data device.
-		 * Conversely, we don't want discards larger than the block size.
-		 */
-		if (src_limits->max_discard_sectors < pool->sectors_per_block) {
-			DMWARN("%s: max discard (%u) is less than block size (%u): Disabling discard passdown.",
-			       dm_device_name(pool->pool_md),
-			       (limits->max_discard_sectors << SECTOR_SHIFT),
-			       pool->sectors_per_block);
-			pool->pf.discard_passdown = 0;
-			goto restart;
-		}
-
-		limits->max_discard_sectors = pool->sectors_per_block;
-		limits->discard_granularity = src_limits->discard_granularity;
-		if ((limits->max_discard_sectors << SECTOR_SHIFT)
-		     & (limits->discard_granularity - 1)) {
-			DMWARN("%s: max discard (%u) is not a multiple of discard granularity (%u): Disabling discard passdown.",
-			       dm_device_name(pool->pool_md),
-			       (limits->max_discard_sectors << SECTOR_SHIFT),
-			       limits->discard_granularity);
-			pool->pf.discard_passdown = 0;
-			goto restart;
-		}
+		return;
 	}
 
-	limits->discard_zeroes_data = pool->pf.zero_new_blocks;
+	/*
+	 * If discard passdown is enabled we cannot support discards
+	 * that are larger than supported by the underlying data device.
+	 * Conversely, we don't want discards larger than the block size.
+	 */
+	if (src_limits->max_discard_sectors < pool->sectors_per_block) {
+		DMWARN("%s: max discard (%u) is less than block size (%u): Disabling discard passdown.",
+		       dm_device_name(pool->pool_md),
+		       (src_limits->max_discard_sectors << SECTOR_SHIFT),
+		       pool->sectors_per_block);
+		pool->pf.discard_passdown = 0;
+		goto restart;
+	}
+
+	limits->max_discard_sectors = pool->sectors_per_block;
+	limits->discard_granularity = src_limits->discard_granularity;
+
+	if ((limits->max_discard_sectors << SECTOR_SHIFT)
+	    & (limits->discard_granularity - 1)) {
+		DMWARN("%s: max discard (%u) is not a multiple of discard granularity (%u): Disabling discard passdown.",
+		       dm_device_name(pool->pool_md),
+		       (limits->max_discard_sectors << SECTOR_SHIFT),
+		       limits->discard_granularity);
+		pool->pf.discard_passdown = 0;
+		goto restart;
+	}
 }
 
 static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
