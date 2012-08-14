@@ -1886,15 +1886,6 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto out_flags_changed;
 	}
 
-	/*
-	 * The block layer requires discard_granularity to be a power of 2.
-	 */
-	if (pf.discard_enabled && !is_power_of_2(block_size)) {
-		ti->error = "Discard support must be disabled when the block size is not a power of 2";
-		r = -EINVAL;
-		goto out_flags_changed;
-	}
-
 	pt->pool = pool;
 	pt->ti = ti;
 	pt->metadata_dev = metadata_dev;
@@ -2372,19 +2363,41 @@ static int pool_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
-static void set_discard_limits(struct pool *pool, struct queue_limits *limits)
+static void set_discard_limits(struct pool *pool, struct block_device *src_bdev,
+			       struct queue_limits *limits)
 {
-	/*
-	 * FIXME: these limits may be incompatible with the pool's data device
-	 */
-	limits->max_discard_sectors = pool->sectors_per_block;
+	struct request_queue *q = bdev_get_queue(src_bdev);
+	struct queue_limits *src_limits = &q->limits;
 
 	/*
-	 * This is just a hint, and not enforced.  We have to cope with
-	 * bios that cover a block partially.  A discard that spans a block
-	 * boundary is not sent to this target.
+	 * We have to cope with discard bios that cover a block partially.
+	 * But a discard that spans a block boundary is not sent to this target.
 	 */
-	limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
+
+	if (!pool->pf.discard_passdown) {
+		limits->max_discard_sectors = pool->sectors_per_block;
+		limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
+		if (pool->sectors_per_block_shift < 0) {
+			/*
+			 * Block size is not a power of 2 but the block layer assumes
+			 * discard_granularity is.  Leverage the fact that block size
+			 * is a multiple of DATA_DEV_BLOCK_SIZE_MIN_SECTORS.
+			 */
+			limits->discard_granularity =
+				DATA_DEV_BLOCK_SIZE_MIN_SECTORS << SECTOR_SHIFT;
+		}
+	} else {
+		/*
+		 * If discard passdown is enabled we cannot support discards
+		 * that are larger than supported by the underlying data device.
+		 * Conversely, we don't want discards larger than the block size.
+		 */
+		limits->max_discard_sectors = src_limits->max_discard_sectors;
+		if (src_limits->max_discard_sectors > pool->sectors_per_block)
+			limits->max_discard_sectors = pool->sectors_per_block;
+		limits->discard_granularity = src_limits->discard_granularity;
+	}
+
 	limits->discard_zeroes_data = pool->pf.zero_new_blocks;
 }
 
@@ -2396,7 +2409,7 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
 	if (pool->pf.discard_enabled)
-		set_discard_limits(pool, limits);
+		set_discard_limits(pool, pt->data_dev->bdev, limits);
 }
 
 static struct target_type pool_target = {
@@ -2689,7 +2702,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
-	set_discard_limits(pool, limits);
+	set_discard_limits(pool, tc->pool_dev->bdev, limits);
 }
 
 static struct target_type thin_target = {
