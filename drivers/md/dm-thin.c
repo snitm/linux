@@ -2405,9 +2405,17 @@ static bool block_size_is_power_of_2(struct pool *pool)
 	return pool->sectors_per_block_shift >= 0;
 }
 
+static bool is_even(unsigned n)
+{
+	return (n & 1) == 0;
+}
+
 static unsigned largest_power_factor(unsigned limit, unsigned min)
 {
-	while ((min < limit) && (((limit / min) & 0x1) == 0))
+	/*
+	 * Determine largest power of 2 that is a factor of @limit
+	 */
+	while ((min < limit) && is_even(limit / min))
 		min <<= 1;
 
 	return min;
