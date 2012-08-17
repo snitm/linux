@@ -624,13 +624,10 @@ static int sd_setup_discard_cmnd(struct scsi_device *sdp, struct request *rq)
 	char *buf;
 	struct page *page;
 
-	if (sdkp->device->sector_size == 4096) {
-		sector >>= 3;
-		nr_sectors >>= 3;
-	}
+	sector >>= ilog2(sdp->sector_size) - 9;
+	nr_sectors >>= ilog2(sdp->sector_size) - 9;
 
 	rq->timeout = SD_TIMEOUT;
-
 	memset(rq->cmd, 0, rq->cmd_len);
 
 	page = alloc_page(GFP_ATOMIC | __GFP_ZERO);
