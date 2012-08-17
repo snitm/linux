@@ -606,14 +606,14 @@ static void sd_config_discard(struct scsi_disk *sdkp, unsigned int mode)
 }
 
 /**
- * scsi_setup_discard_cmnd - unmap blocks on thinly provisioned device
+ * sd_setup_discard_cmnd - unmap blocks on thinly provisioned device
  * @sdp: scsi device to operate one
  * @rq: Request to prepare
  *
  * Will issue either UNMAP or WRITE SAME(16) depending on preference
  * indicated by target device.
  **/
-static int scsi_setup_discard_cmnd(struct scsi_device *sdp, struct request *rq)
+static int sd_setup_discard_cmnd(struct scsi_device *sdp, struct request *rq)
 {
 	struct scsi_disk *sdkp = scsi_disk(rq->rq_disk);
 	struct bio *bio = rq->bio;
@@ -764,7 +764,7 @@ static int sd_setup_write_same_cmnd(struct scsi_device *sdp, struct request *rq)
 	return scsi_setup_blk_pc_cmnd(sdp, rq);
 }
 
-static int scsi_setup_flush_cmnd(struct scsi_device *sdp, struct request *rq)
+static int sd_setup_flush_cmnd(struct scsi_device *sdp, struct request *rq)
 {
 	rq->timeout = SD_FLUSH_TIMEOUT;
 	rq->retries = SD_MAX_RETRIES;
@@ -807,13 +807,13 @@ static int sd_prep_fn(struct request_queue *q, struct request *rq)
 	 * block PC requests to make life easier.
 	 */
 	if (rq->cmd_flags & REQ_DISCARD) {
-		ret = scsi_setup_discard_cmnd(sdp, rq);
+		ret = sd_setup_discard_cmnd(sdp, rq);
 		goto out;
 	} else if (rq->cmd_flags & REQ_WRITE_SAME) {
 		ret = sd_setup_write_same_cmnd(sdp, rq);
 		goto out;
 	} else if (rq->cmd_flags & REQ_FLUSH) {
-		ret = scsi_setup_flush_cmnd(sdp, rq);
+		ret = sd_setup_flush_cmnd(sdp, rq);
 		goto out;
 	} else if (rq->cmd_type == REQ_TYPE_BLOCK_PC) {
 		ret = scsi_setup_blk_pc_cmnd(sdp, rq);
