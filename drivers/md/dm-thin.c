@@ -535,6 +535,7 @@ static void process_prepared_mapping_fail(struct dm_thin_new_mapping *m)
 {
 	if (m->bio)
 		m->bio->bi_end_io = m->saved_bi_end_io;
+
 	dm_cell_error(m->cell);
 	list_del(&m->list);
 	mempool_free(m, m->tc->pool->mapping_pool);
@@ -1909,6 +1910,15 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	 */
 	if (!pool_created && pf.discard_enabled != pool->pf.discard_enabled) {
 		ti->error = "Discard support cannot be disabled once enabled";
+		r = -EINVAL;
+		goto out_flags_changed;
+	}
+
+	/*
+	 * The block layer requires discard_granularity to be a power of 2.
+	 */
+	if (pf.discard_enabled && !is_power_of_2(block_size)) {
+		ti->error = "Discard support must be disabled when the block size is not a power of 2";
 		r = -EINVAL;
 		goto out_flags_changed;
 	}
