@@ -81,7 +81,15 @@ struct dm_cache_metadata {
 	dm_block_t root;
 	sector_t data_block_size;
 	dm_block_t cache_blocks;
-	bool changed;
+	bool changed:1;
+	bool aborted_with_changes:1;
+
+	/*
+	 * Set if a transaction has to be aborted but the attempt to roll back
+	 * to the previous (good) transaction failed.  The only cache metadata
+	 * operation possible in this state is the closing of the device.
+	 */
+	bool fail_io:1;
 };
 
 /*-------------------------------------------------------------------
@@ -503,6 +511,8 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	cmd->data_block_size = data_block_size;
 	cmd->cache_blocks = 0;
 	cmd->changed = true;
+	cmd->fail_io = false;
+
 	r = __create_persistent_data_objects(cmd, may_format_device);
 	if (r) {
 		kfree(cmd);
@@ -518,29 +528,41 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	return cmd;
 }
 
-void dm_cache_metadata_close(struct dm_cache_metadata *cmd)
+int dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 {
+	int r;
 	unsigned sb_flags;
 
-	dm_cache_read_superblock_flags(cmd, &sb_flags);
-	sb_flags &= ~CACHE_DIRTY;
-	__commit_transaction(cmd, &sb_flags);
-	__destroy_persistent_data_objects(cmd);
+	if (!cmd->fail_io) {
+		dm_cache_read_superblock_flags(cmd, &sb_flags);
+		sb_flags &= ~CACHE_DIRTY;
+		r = __commit_transaction(cmd, &sb_flags);
+		if (r < 0)
+			DMWARN("%s: __commit_transaction() failed, error = %d",
+			       __func__, r);
+	}
+
+	if (!cmd->fail_io)
+		__destroy_persistent_data_objects(cmd);
+
 	kfree(cmd);
+	return 0;
 }
 
 int dm_cache_resize(struct dm_cache_metadata *cmd, dm_block_t new_cache_size)
 {
-	int r;
+	int r = -EINVAL;
 	__le64 null_mapping = pack_value(0, 0);
 
 	down_write(&cmd->root_lock);
-	__dm_bless_for_disk(&null_mapping);
-	r = dm_array_resize(&cmd->info, cmd->root, cmd->cache_blocks, new_cache_size,
-			    &null_mapping, &cmd->root);
-	if (!r)
-		cmd->cache_blocks = new_cache_size;
-	cmd->changed = true;
+	if (!cmd->fail_io) {
+		__dm_bless_for_disk(&null_mapping);
+		r = dm_array_resize(&cmd->info, cmd->root, cmd->cache_blocks,
+				    new_cache_size, &null_mapping, &cmd->root);
+		if (!r)
+			cmd->cache_blocks = new_cache_size;
+		cmd->changed = true;
+	}
 	up_write(&cmd->root_lock);
 
 	return r;
@@ -568,16 +590,17 @@ static int __remove(struct dm_cache_metadata *cmd, dm_block_t cblock)
 	if (r)
 		return r;
 
-	cmd->changed = 1;
+	cmd->changed = true;
 	return 0;
 }
 
 int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_block_t oblock)
 {
-	int r;
+	int r = -EINVAL;
 
 	down_write(&cmd->root_lock);
-	r = __remove(cmd, oblock);
+	if (!cmd->fail_io)
+		r = __remove(cmd, oblock);
 	up_write(&cmd->root_lock);
 
 	return r;
@@ -595,17 +618,18 @@ static int __insert(struct dm_cache_metadata *cmd,
 	if (r)
 		return r;
 
-	cmd->changed = 1;
+	cmd->changed = true;
 	return 0;
 }
 
 int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock,
 			    dm_block_t oblock)
 {
-	int r;
+	int r = -EINVAL;
 
 	down_write(&cmd->root_lock);
-	r = __insert(cmd, cblock, oblock);
+	if (!cmd->fail_io)
+		r = __insert(cmd, cblock, oblock);
 	up_write(&cmd->root_lock);
 
 	return r;
@@ -648,11 +672,12 @@ int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
 			   load_mapping_fn fn,
 			   void *context)
 {
-	int r;
+	int r = -EINVAL;
 
 	debug("> dm_cache_load_mappings\n");
 	down_read(&cmd->root_lock);
-	r = __load_mappings(cmd, fn, context);
+	if (!cmd->fail_io)
+		r = __load_mappings(cmd, fn, context);
 	up_read(&cmd->root_lock);
 	debug("< dm_cache_load_mappings\n");
 
@@ -716,13 +741,50 @@ int dm_cache_commit(struct dm_cache_metadata *cmd)
 	return dm_cache_commit_with_flags(cmd, NULL);
 }
 
+static void __set_abort_with_changes_flags(struct dm_cache_metadata *cmd)
+{
+	cmd->aborted_with_changes = cmd->changed;
+}
+
+int dm_cache_abort_metadata(struct dm_cache_metadata *cmd)
+{
+	int r = -EINVAL;
+
+	down_write(&cmd->root_lock);
+	if (cmd->fail_io)
+		goto out;
+
+	__set_abort_with_changes_flags(cmd);
+	__destroy_persistent_data_objects(cmd);
+	r = __create_persistent_data_objects(cmd, false);
+	if (r)
+		cmd->fail_io = true;
+
+out:
+	up_write(&cmd->root_lock);
+
+	return r;
+}
+
+bool dm_cache_aborted_changes(struct dm_cache_metadata *cmd)
+{
+	bool r;
+
+	down_read(&cmd->root_lock);
+	r = cmd->aborted_with_changes;
+	up_read(&cmd->root_lock);
+
+	return r;
+}
+
 int dm_cache_get_free_metadata_block_count(struct dm_cache_metadata *cmd,
 					   dm_block_t *result)
 {
 	int r = -EINVAL;
 
 	down_read(&cmd->root_lock);
-	r = dm_sm_get_nr_free(cmd->metadata_sm, result);
+	if (!cmd->fail_io)
+		r = dm_sm_get_nr_free(cmd->metadata_sm, result);
 	up_read(&cmd->root_lock);
 
 	return r;
@@ -734,7 +796,8 @@ int dm_cache_get_metadata_dev_size(struct dm_cache_metadata *cmd,
 	int r = -EINVAL;
 
 	down_read(&cmd->root_lock);
-	r = dm_sm_get_nr_blocks(cmd->metadata_sm, result);
+	if (!cmd->fail_io)
+		r = dm_sm_get_nr_blocks(cmd->metadata_sm, result);
 	up_read(&cmd->root_lock);
 
 	return r;

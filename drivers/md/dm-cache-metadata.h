@@ -43,7 +43,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 						 sector_t data_block_size,
 						 bool may_format_device);
 
-void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
+int dm_cache_metadata_close(struct dm_cache_metadata *cmd);
 
 /*
  * The metadata needs to know how many cache blocks there are.  We're dont
@@ -67,6 +67,8 @@ int dm_cache_read_superblock_flags(struct dm_cache_metadata *cmd, unsigned *flag
 int dm_cache_commit_with_flags(struct dm_cache_metadata *cmd, unsigned *flags);
 
 int dm_cache_commit(struct dm_cache_metadata *cmd);
+
+bool dm_cache_aborted_changes(struct dm_cache_metadata *cmd);
 
 int dm_cache_get_free_metadata_block_count(struct dm_cache_metadata *cmd,
 					   dm_block_t *result);
