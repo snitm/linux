@@ -58,7 +58,7 @@
  * i) plug io further to this physical block. (see bio_prison code).
  *
  * ii) quiesce any read io to that shared data block.  Obviously
- * including all devices that share this block.  (see deferred_set code)
+ * including all devices that share this block.  (see dm_deferred_set code)
  *
  * iii) copy the data block to a newly allocate block.  This step can be
  * missed out if the io covers the block. (schedule_copy).
@@ -535,7 +535,6 @@ static void process_prepared_mapping_fail(struct dm_thin_new_mapping *m)
 {
 	if (m->bio)
 		m->bio->bi_end_io = m->saved_bi_end_io;
-
 	dm_cell_error(m->cell);
 	list_del(&m->list);
 	mempool_free(m, m->tc->pool->mapping_pool);
@@ -697,7 +696,7 @@ static void schedule_copy(struct thin_c *tc, dm_block_t virt_block,
 	m->err = 0;
 	m->bio = NULL;
 
-	if (!dm_ds_add_work(pool->shared_read_ds, &m->list))
+	if (!dm_deferred_set_add_work(pool->shared_read_ds, &m->list))
 		m->quiesced = 1;
 
 	/*
@@ -956,7 +955,7 @@ static void process_discard(struct thin_c *tc, struct bio *bio)
 			m->err = 0;
 			m->bio = bio;
 
-			if (!dm_ds_add_work(pool->all_io_ds, &m->list)) {
+			if (!dm_deferred_set_add_work(pool->all_io_ds, &m->list)) {
 				spin_lock_irqsave(&pool->lock, flags);
 				list_add(&m->list, &pool->prepared_discards);
 				spin_unlock_irqrestore(&pool->lock, flags);
@@ -1040,7 +1039,7 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 	else {
 		struct dm_thin_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
-		h->shared_read_entry = dm_ds_inc(pool->shared_read_ds);
+		h->shared_read_entry = dm_deferred_entry_inc(pool->shared_read_ds);
 
 		dm_cell_release_singleton(cell, bio);
 		remap_and_issue(tc, bio, lookup_result->block);
@@ -1348,7 +1347,7 @@ static struct dm_thin_endio_hook *thin_hook_bio(struct thin_c *tc, struct bio *b
 
 	h->tc = tc;
 	h->shared_read_entry = NULL;
-	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : dm_ds_inc(pool->all_io_ds);
+	h->all_io_entry = bio->bi_rw & REQ_DISCARD ? NULL : dm_deferred_entry_inc(pool->all_io_ds);
 	h->overwrite_mapping = NULL;
 
 	return h;
@@ -1568,8 +1567,8 @@ static void __pool_destroy(struct pool *pool)
 		mempool_free(pool->next_mapping, pool->mapping_pool);
 	mempool_destroy(pool->mapping_pool);
 	mempool_destroy(pool->endio_hook_pool);
-	dm_ds_destroy(pool->shared_read_ds);
-	dm_ds_destroy(pool->all_io_ds);
+	dm_deferred_set_destroy(pool->shared_read_ds);
+	dm_deferred_set_destroy(pool->all_io_ds);
 	kfree(pool);
 }
 
@@ -1645,11 +1644,11 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	pool->no_free_space = 0;
 	bio_list_init(&pool->retry_on_resume_list);
 
-	pool->shared_read_ds = dm_ds_create();
+	pool->shared_read_ds = dm_deferred_set_create();
 	if (!pool->shared_read_ds)
-		goto bad_shared_ds;
+		goto bad_shared_read_ds;
 
-	pool->all_io_ds = dm_ds_create();
+	pool->all_io_ds = dm_deferred_set_create();
 	if (!pool->all_io_ds)
 		goto bad_all_io_ds;
 
@@ -1680,10 +1679,10 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 bad_endio_hook_pool:
 	mempool_destroy(pool->mapping_pool);
 bad_mapping_pool:
-	dm_ds_destroy(pool->all_io_ds);
+	dm_deferred_set_destroy(pool->all_io_ds);
 bad_all_io_ds:
-	dm_ds_destroy(pool->shared_read_ds);
-bad_shared_ds:
+	dm_deferred_set_destroy(pool->shared_read_ds);
+bad_shared_read_ds:
 	destroy_workqueue(pool->wq);
 bad_wq:
 	dm_kcopyd_client_destroy(pool->copier);
@@ -2634,7 +2633,7 @@ static int thin_endio(struct dm_target *ti,
 
 	if (h->shared_read_entry) {
 		INIT_LIST_HEAD(&work);
-		dm_ds_dec(h->shared_read_entry, &work);
+		dm_deferred_entry_dec(h->shared_read_entry, &work);
 
 		spin_lock_irqsave(&pool->lock, flags);
 		list_for_each_entry_safe(m, tmp, &work, list) {
@@ -2647,7 +2646,7 @@ static int thin_endio(struct dm_target *ti,
 
 	if (h->all_io_entry) {
 		INIT_LIST_HEAD(&work);
-		dm_ds_dec(h->all_io_entry, &work);
+		dm_deferred_entry_dec(h->all_io_entry, &work);
 		spin_lock_irqsave(&pool->lock, flags);
 		list_for_each_entry_safe(m, tmp, &work, list)
 			list_add(&m->list, &pool->prepared_discards);
@@ -2750,7 +2749,7 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 4, 0},
+	.version = {1, 5, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,

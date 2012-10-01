@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Red Hat UK.  All rights reserved.
+ * Copyright (C) 2011-2012 Red Hat, Inc.
  *
  * This file is released under the GPL.
  */
@@ -62,12 +62,12 @@ void dm_cell_error(struct dm_bio_prison_cell *cell);
 struct dm_deferred_set;
 struct dm_deferred_entry;
 
-struct dm_deferred_set *dm_ds_create(void);
-void dm_ds_destroy(struct dm_deferred_set *ds);
+struct dm_deferred_set *dm_deferred_set_create(void);
+void dm_deferred_set_destroy(struct dm_deferred_set *ds);
 
-struct dm_deferred_entry *dm_ds_inc(struct dm_deferred_set *ds);
-void dm_ds_dec(struct dm_deferred_entry *entry, struct list_head *head);
-int dm_ds_add_work(struct dm_deferred_set *ds, struct list_head *work);
+struct dm_deferred_entry *dm_deferred_entry_inc(struct dm_deferred_set *ds);
+void dm_deferred_entry_dec(struct dm_deferred_entry *entry, struct list_head *head);
+int dm_deferred_set_add_work(struct dm_deferred_set *ds, struct list_head *work);
 
 /*----------------------------------------------------------------*/
 

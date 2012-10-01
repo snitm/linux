@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Red Hat UK.
+ * Copyright (C) 2012 Red Hat, Inc.
  *
  * This file is released under the GPL.
  */
@@ -115,6 +115,12 @@ static struct dm_bio_prison_cell *__search_bucket(struct hlist_head *bucket,
 	return NULL;
 }
 
+/*
+ * This may block if a new cell needs allocating.  You must ensure that
+ * cells will be unlocked even if the calling thread is blocked.
+ *
+ * Returns 1 if the cell was already held, 0 if @inmate is the new holder.
+ */
 int dm_bio_detain(struct dm_bio_prison *prison, struct dm_cell_key *key,
 		  struct bio *inmate, struct dm_bio_prison_cell **ref)
 {
@@ -172,8 +178,8 @@ out:
 }
 EXPORT_SYMBOL_GPL(dm_bio_detain);
 
-int bio_detain_if_occupied(struct dm_bio_prison *prison, struct dm_cell_key *key,
-			   struct bio *inmate)
+int dm_bio_detain_if_occupied(struct dm_bio_prison *prison, struct dm_cell_key *key,
+			      struct bio *inmate)
 {
 	int r = 0;
 	unsigned long flags;
@@ -193,7 +199,7 @@ int bio_detain_if_occupied(struct dm_bio_prison *prison, struct dm_cell_key *key
 	spin_unlock_irqrestore(&prison->lock, flags);
 	return r;
 }
-EXPORT_SYMBOL_GPL(bio_detain_if_occupied);
+EXPORT_SYMBOL_GPL(dm_bio_detain_if_occupied);
 
 /*
  * @inmates must have been initialised prior to this call
@@ -307,7 +313,7 @@ struct dm_deferred_set {
 	struct dm_deferred_entry entries[DEFERRED_SET_SIZE];
 };
 
-struct dm_deferred_set *dm_ds_create(void)
+struct dm_deferred_set *dm_deferred_set_create(void)
 {
 	int i;
 	struct dm_deferred_set *ds;
@@ -325,15 +331,15 @@ struct dm_deferred_set *dm_ds_create(void)
 
 	return ds;
 }
-EXPORT_SYMBOL_GPL(dm_ds_create);
+EXPORT_SYMBOL_GPL(dm_deferred_set_create);
 
-void dm_ds_destroy(struct dm_deferred_set *ds)
+void dm_deferred_set_destroy(struct dm_deferred_set *ds)
 {
 	kfree(ds);
 }
-EXPORT_SYMBOL_GPL(dm_ds_destroy);
+EXPORT_SYMBOL_GPL(dm_deferred_set_destroy);
 
-struct dm_deferred_entry *dm_ds_inc(struct dm_deferred_set *ds)
+struct dm_deferred_entry *dm_deferred_entry_inc(struct dm_deferred_set *ds)
 {
 	unsigned long flags;
 	struct dm_deferred_entry *entry;
@@ -345,7 +351,7 @@ struct dm_deferred_entry *dm_ds_inc(struct dm_deferred_set *ds)
 
 	return entry;
 }
-EXPORT_SYMBOL_GPL(dm_ds_inc);
+EXPORT_SYMBOL_GPL(dm_deferred_entry_inc);
 
 static unsigned ds_next(unsigned index)
 {
@@ -364,7 +370,7 @@ static void __sweep(struct dm_deferred_set *ds, struct list_head *head)
 		list_splice_init(&ds->entries[ds->sweeper].work_items, head);
 }
 
-void dm_ds_dec(struct dm_deferred_entry *entry, struct list_head *head)
+void dm_deferred_entry_dec(struct dm_deferred_entry *entry, struct list_head *head)
 {
 	unsigned long flags;
 
@@ -374,12 +380,12 @@ void dm_ds_dec(struct dm_deferred_entry *entry, struct list_head *head)
 	__sweep(entry->ds, head);
 	spin_unlock_irqrestore(&entry->ds->lock, flags);
 }
-EXPORT_SYMBOL_GPL(dm_ds_dec);
+EXPORT_SYMBOL_GPL(dm_deferred_entry_dec);
 
 /*
  * Returns 1 if deferred or 0 if no pending items to delay job.
  */
-int dm_ds_add_work(struct dm_deferred_set *ds, struct list_head *work)
+int dm_deferred_set_add_work(struct dm_deferred_set *ds, struct list_head *work)
 {
 	int r = 1;
 	unsigned long flags;
@@ -399,7 +405,7 @@ int dm_ds_add_work(struct dm_deferred_set *ds, struct list_head *work)
 
 	return r;
 }
-EXPORT_SYMBOL_GPL(dm_ds_add_work);
+EXPORT_SYMBOL_GPL(dm_deferred_set_add_work);
 
 /*----------------------------------------------------------------*/
 

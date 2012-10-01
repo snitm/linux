@@ -537,7 +537,7 @@ static void check_for_quiesced_migrations(struct cache_c *c, struct dm_cache_end
 
 	INIT_LIST_HEAD(&work);
 	if (h->all_io_entry)
-		dm_ds_dec(h->all_io_entry, &work);
+		dm_deferred_entry_dec(h->all_io_entry, &work);
 
 	if (!list_empty(&work))
 		queue_quiesced_migrations(c, &work);
@@ -545,7 +545,7 @@ static void check_for_quiesced_migrations(struct cache_c *c, struct dm_cache_end
 
 static void quiesce_migration(struct cache_c *c, struct dm_cache_migration *mg)
 {
-	if (!dm_ds_add_work(c->all_io_ds, &mg->list))
+	if (!dm_deferred_set_add_work(c->all_io_ds, &mg->list))
 		queue_quiesced_migration(c, mg);
 }
 
@@ -677,14 +677,14 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
-		h->all_io_entry = dm_ds_inc(c->all_io_ds);
+		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
 		remap_to_cache_dirty(c, bio, block, lookup_result.cblock);
 		issue(c, bio);
 		break;
 
 	case POLICY_MISS:
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
-		h->all_io_entry = dm_ds_inc(c->all_io_ds);
+		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
 		remap_to_origin_dirty(c, bio, block);
 		issue(c, bio);
 		break;
@@ -931,7 +931,7 @@ static void cache_dtr(struct dm_target *ti)
 
 	mempool_destroy(c->migration_pool);
 	mempool_destroy(c->endio_hook_pool);
-	dm_ds_destroy(c->all_io_ds);
+	dm_deferred_set_destroy(c->all_io_ds);
 	dm_bio_prison_destroy(c->prison);
 	destroy_workqueue(c->wq);
 	free_bitset(c->dirty_bitset);
@@ -1089,7 +1089,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad_prison;
 	}
 
-	c->all_io_ds = dm_ds_create();
+	c->all_io_ds = dm_deferred_set_create();
 	if (!c->all_io_ds) {
 		ti->error = "couldn't create all_io deferred set";
 		goto bad_deferred_set;
@@ -1149,7 +1149,7 @@ bad_cache_policy:
 bad_migration_pool:
 	mempool_destroy(c->endio_hook_pool);
 bad_endio_hook_pool:
-	dm_ds_destroy(c->all_io_ds);
+	dm_deferred_set_destroy(c->all_io_ds);
 bad_deferred_set:
 	dm_bio_prison_destroy(c->prison);
 bad_prison:
@@ -1237,14 +1237,14 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	switch (lookup_result.op) {
 	case POLICY_HIT:
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_hit : &c->write_hit);
-		h->all_io_entry = dm_ds_inc(c->all_io_ds);
+		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
 		remap_to_cache_dirty(c, bio, block, lookup_result.cblock);
 		cell_defer(c, cell, false);
 		break;
 
 	case POLICY_MISS:
 		atomic_inc(bio_data_dir(bio) == READ ? &c->read_miss : &c->write_miss);
-		h->all_io_entry = dm_ds_inc(c->all_io_ds);
+		h->all_io_entry = dm_deferred_entry_inc(c->all_io_ds);
 		remap_to_origin_dirty(c, bio, block);
 		cell_defer(c, cell, false);
 		break;
