@@ -178,29 +178,6 @@ out:
 }
 EXPORT_SYMBOL_GPL(dm_bio_detain);
 
-int dm_bio_detain_if_occupied(struct dm_bio_prison *prison, struct dm_cell_key *key,
-			      struct bio *inmate)
-{
-	int r = 0;
-	unsigned long flags;
-	uint32_t hash = hash_key(prison, key);
-	struct dm_bio_prison_cell *cell;
-
-	BUG_ON(hash > prison->nr_buckets);
-
-	spin_lock_irqsave(&prison->lock, flags);
-
-	cell = __search_bucket(prison->cells + hash, key);
-	if (cell) {
-		bio_list_add(&cell->bios, inmate);
-		r = 1;
-	}
-
-	spin_unlock_irqrestore(&prison->lock, flags);
-	return r;
-}
-EXPORT_SYMBOL_GPL(dm_bio_detain_if_occupied);
-
 /*
  * @inmates must have been initialised prior to this call
  */
