@@ -157,6 +157,13 @@ static int superblock_lock(struct dm_cache_metadata *cmd,
 				&sb_validator, sblock);
 }
 
+static int superblock_read_lock(struct dm_cache_metadata *cmd,
+				struct dm_block **sblock)
+{
+	return dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
+			       &sb_validator, sblock);
+}
+
 static int __superblock_all_zeroes(struct dm_block_manager *bm, int *result)
 {
 	int r;
@@ -387,8 +394,7 @@ static int __begin_transaction(struct dm_cache_metadata *cmd)
 	 * We re-read the superblock every time.  Shouldn't need to do this
 	 * really.
 	 */
-	r = dm_bm_read_lock(cmd->bm, CACHE_SUPERBLOCK_LOCATION,
-			    &sb_validator, &sblock);
+	r = superblock_read_lock(cmd, &sblock);
 	if (r)
 		return r;
 
@@ -402,7 +408,18 @@ static int __begin_transaction(struct dm_cache_metadata *cmd)
 	return 0;
 }
 
-static int __commit_transaction(struct dm_cache_metadata *cmd)
+static void set_superblock_flags(struct cache_disk_superblock *disk_super,
+				 unsigned flags)
+{
+	disk_super->flags = cpu_to_le32((uint32_t) flags);
+}
+
+static unsigned get_superblock_flags(struct cache_disk_superblock *disk_super)
+{
+	return le32_to_cpu(disk_super->flags);
+}
+
+static int __commit_transaction(struct dm_cache_metadata *cmd, unsigned *flags)
 {
 	int r;
 	size_t metadata_len;
@@ -411,7 +428,7 @@ static int __commit_transaction(struct dm_cache_metadata *cmd)
 
 	debug("__commit_transaction\n");
 	/*
-	 * We need to know if the thin_disk_superblock exceeds a 512-byte sector.
+	 * We need to know if the cache_disk_superblock exceeds a 512-byte sector.
 	 */
 	BUILD_BUG_ON(sizeof(struct cache_disk_superblock) > 512);
 
@@ -431,6 +448,8 @@ static int __commit_transaction(struct dm_cache_metadata *cmd)
 	debug("root = %lu\n", (unsigned long) cmd->root);
 	disk_super->mapping_root = cpu_to_le64(cmd->root);
 	disk_super->cache_blocks = cpu_to_le32(cmd->cache_blocks);
+	if (flags)
+		set_superblock_flags(disk_super, *flags);
 
 	r = dm_sm_copy_root(cmd->metadata_sm, &disk_super->metadata_space_map_root,
 			    metadata_len);
@@ -501,7 +520,11 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 
 void dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 {
-	__commit_transaction(cmd);
+	unsigned sb_flags;
+
+	dm_cache_read_superblock_flags(cmd, &sb_flags);
+	sb_flags &= ~CACHE_DIRTY;
+	__commit_transaction(cmd, &sb_flags);
 	__destroy_persistent_data_objects(cmd);
 	kfree(cmd);
 }
@@ -576,7 +599,8 @@ static int __insert(struct dm_cache_metadata *cmd,
 	return 0;
 }
 
-int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock, dm_block_t oblock)
+int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_block_t cblock,
+			    dm_block_t oblock)
 {
 	int r;
 
@@ -646,12 +670,37 @@ int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd)
 	return r;
 }
 
-int dm_cache_commit(struct dm_cache_metadata *cmd)
+int dm_cache_read_superblock_flags(struct dm_cache_metadata *cmd, unsigned *flags)
+{
+	struct cache_disk_superblock *disk_super;
+	struct dm_block *sblock;
+	int r;
+
+	down_read(&cmd->root_lock);
+	r = superblock_read_lock(cmd, &sblock);
+	if (r) {
+		up_read(&cmd->root_lock);
+		return r;
+	}
+
+	disk_super = dm_block_data(sblock);
+	*flags = get_superblock_flags(disk_super);
+
+	dm_bm_unlock(sblock);
+	up_read(&cmd->root_lock);
+
+	return 0;
+}
+
+/*
+ * If @flags is NULL then the superblock's flags are left unchanged.
+ */
+int dm_cache_commit_with_flags(struct dm_cache_metadata *cmd, unsigned *flags)
 {
 	int r;
 
 	down_write(&cmd->root_lock);
-	r = __commit_transaction(cmd);
+	r = __commit_transaction(cmd, flags);
 	if (r)
 		goto out;
 
@@ -660,6 +709,11 @@ int dm_cache_commit(struct dm_cache_metadata *cmd)
 out:
 	up_write(&cmd->root_lock);
 	return r;
+}
+
+int dm_cache_commit(struct dm_cache_metadata *cmd)
+{
+	return dm_cache_commit_with_flags(cmd, NULL);
 }
 
 /*----------------------------------------------------------------*/

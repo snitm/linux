@@ -1279,7 +1279,20 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 
 static void cache_postsuspend(struct dm_target *ti)
 {
+	int r;
+	unsigned sb_flags;
 	struct cache_c *c = ti->private;
+
+	r = dm_cache_read_superblock_flags(c->cmd, &sb_flags);
+	if (r) {
+		DMERR("could not read superblock flags during suspend");
+		return;
+	}
+
+	sb_flags &= ~CACHE_DIRTY;
+	r = dm_cache_commit_with_flags(c->cmd, &sb_flags);
+	if (r)
+		DMERR("could not clear dirty flag in metadata superblock");
 
 	start_quiescing(c);
 	wait_for_migrations(c);
@@ -1290,9 +1303,27 @@ static void cache_postsuspend(struct dm_target *ti)
 
 static void cache_resume(struct dm_target *ti)
 {
+	int r;
+	unsigned sb_flags;
 	struct cache_c *c = ti->private;
+
 	c->need_tick_bio = true;
 	do_waker(&c->waker.work);
+
+	r = dm_cache_read_superblock_flags(c->cmd, &sb_flags);
+	if (r) {
+		DMERR("could not read superblock flags during resume");
+		return;
+	}
+
+	if (sb_flags & CACHE_DIRTY)
+		/* FIXME: perform cache policy recovery */
+		DMERR("cache metadata was not written cleanly during previous shutdown");
+
+	sb_flags &= CACHE_DIRTY;
+	r = dm_cache_commit_with_flags(c->cmd, &sb_flags);
+	if (r)
+		DMERR("could not set dirty flag in metadata superblock");
 }
 
 static int cache_status(struct dm_target *ti, status_type_t type,
