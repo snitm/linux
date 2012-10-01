@@ -716,5 +716,26 @@ int dm_cache_commit(struct dm_cache_metadata *cmd)
 	return dm_cache_commit_with_flags(cmd, NULL);
 }
 
-/*----------------------------------------------------------------*/
+int dm_cache_get_free_metadata_block_count(struct dm_cache_metadata *cmd,
+					   dm_block_t *result)
+{
+	int r = -EINVAL;
 
+	down_read(&cmd->root_lock);
+	r = dm_sm_get_nr_free(cmd->metadata_sm, result);
+	up_read(&cmd->root_lock);
+
+	return r;
+}
+
+int dm_cache_get_metadata_dev_size(struct dm_cache_metadata *cmd,
+				   dm_block_t *result)
+{
+	int r = -EINVAL;
+
+	down_read(&cmd->root_lock);
+	r = dm_sm_get_nr_blocks(cmd->metadata_sm, result);
+	up_read(&cmd->root_lock);
+
+	return r;
+}

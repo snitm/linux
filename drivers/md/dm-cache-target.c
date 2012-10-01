@@ -1329,16 +1329,39 @@ static void cache_resume(struct dm_target *ti)
 static int cache_status(struct dm_target *ti, status_type_t type,
 			unsigned status_flags, char *result, unsigned maxlen)
 {
+	int r;
 	ssize_t sz = 0;
+	dm_block_t nr_free_blocks_metadata;
+	dm_block_t nr_blocks_metadata;
 	char buf[BDEVNAME_SIZE];
 	struct cache_c *c = ti->private;
 	dm_block_t residency;
 
 	switch (type) {
 	case STATUSTYPE_INFO:
+		/* Commit to ensure statistics aren't out-of-date */
+		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti)) {
+			r = dm_cache_commit(c->cmd);
+			if (r) {
+				DMERR("could not commit metadata");
+				return r;
+			}
+		}
+
+		r = dm_cache_get_free_metadata_block_count(c->cmd,
+							   &nr_free_blocks_metadata);
+		if (r)
+			return r;
+
+		r = dm_cache_get_metadata_dev_size(c->cmd, &nr_blocks_metadata);
+		if (r)
+			return r;
+
 		residency = policy_residency(c->policy);
 
-		DMEMIT("%u %u %u %u %u %u %llu %u",
+		DMEMIT("%llu/%llu %u %u %u %u %u %u %llu %u",
+		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
+		       (unsigned long long)nr_blocks_metadata,
 		       (unsigned) atomic_read(&c->read_hit),
 		       (unsigned) atomic_read(&c->read_miss),
 		       (unsigned) atomic_read(&c->write_hit),
