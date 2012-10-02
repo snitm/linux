@@ -67,6 +67,21 @@ static void free_bitset(unsigned long *bits)
 #define COMMIT_PERIOD HZ
 #define MIGRATION_COUNT_WINDOW 10
 
+/*
+ * The cache runs in 3 modes.  Ordered in degraded order for comparisons.
+ * FIXME: factor out to common code to share with dm-thin
+ */
+enum cache_mode {
+	CM_WRITE,		/* metadata may be changed */
+	CM_READ_ONLY,		/* metadata may not be changed */
+	CM_FAIL,		/* all I/O fails */
+};
+
+struct cache_c;
+struct dm_cache_migration;
+typedef void (*process_bio_fn)(struct cache_c *c, struct bio *bio);
+typedef void (*process_migration_fn)(struct cache_c *c, struct dm_cache_migration *mg);
+
 struct cache_c {
 	struct dm_target *ti;
 	struct dm_target_callbacks callbacks;
@@ -86,6 +101,15 @@ struct cache_c {
 	 */
 	struct dm_dev *cache_dev;
 
+	struct dm_cache_metadata *cmd;
+
+	process_bio_fn process_bio;
+	process_bio_fn process_discard;
+	process_bio_fn process_flush;
+
+	process_migration_fn issue_copy;
+	process_migration_fn complete_migration;
+
 	/*
 	 * Size of the origin device in _complete_ blocks and native sectors.
 	 */
@@ -104,15 +128,16 @@ struct cache_c {
 	sector_t offset_mask;
 	unsigned int block_shift;
 
-	struct dm_cache_metadata *cmd;
-
 	spinlock_t lock;
 	struct bio_list deferred_bios;
 	struct bio_list deferred_flush_bios;
 	struct list_head quiesced_migrations;
 	struct list_head completed_migrations;
-	atomic_t nr_migrations;
 	wait_queue_head_t migration_wait;
+	atomic_t nr_migrations;
+
+	/* FIXME: store in cache_features to expose configurable readonly support, etc */
+	enum cache_mode mode;
 
 	/*
 	 * cache_size entries, dirty if set
@@ -139,10 +164,10 @@ struct cache_c {
 	mempool_t *migration_pool;
 	struct dm_cache_migration *next_migration;
 
-	bool need_tick_bio;
+	bool need_tick_bio:1;
 
+	bool quiescing:1;
 	struct dm_cache_policy *policy;
-	bool quiescing;
 
 	atomic_t read_hit;
 	atomic_t read_miss;
@@ -621,7 +646,7 @@ static void defer_bio(struct cache_c *cache, struct bio *bio)
 	wake_worker(cache);
 }
 
-static void process_flush_bio(struct cache_c *c, struct bio *bio)
+static void process_flush(struct cache_c *c, struct bio *bio)
 {
 	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
 
@@ -655,7 +680,7 @@ static bool covers_block(struct cache_c *c, struct bio *bio)
  * can have a key that spans many blocks.  This change is planned for
  * thin-provisioning.
  */
-static void process_discard_bio(struct cache_c *c, struct bio *bio)
+static void process_discard(struct cache_c *c, struct bio *bio)
 {
 	dm_block_t start_block = dm_div_up(bio->bi_sector, c->sectors_per_block);
 	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
@@ -739,6 +764,103 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 		cell_defer(c, new_ocell, 0);
 }
 
+static void process_bio_read_only(struct cache_c *c, struct bio *bio)
+{
+	/* FIXME: implement */
+	bio_io_error(bio);
+}
+
+static void process_bio_fail(struct cache_c *c, struct bio *bio)
+{
+	bio_io_error(bio);
+}
+
+/*----------------------------------------------------------------*/
+
+/* FIXME: factor out to common code to share with dm-thin */
+
+static enum cache_mode get_cache_mode(struct cache_c *cache)
+{
+	return cache->mode;
+}
+
+/* FIXME: could use different name, so as not to be confused with wb and wt */
+static void set_cache_mode(struct cache_c *cache, enum cache_mode mode)
+{
+	int r;
+
+	cache->mode = mode;
+
+	switch (mode) {
+	case CM_FAIL:
+		DMERR("switching cache to failure mode");
+		cache->process_bio = process_bio_fail;
+		cache->process_discard = process_bio_fail;
+		cache->process_flush = process_bio_fail;
+		cache->issue_copy = issue_copy; /* FIXME */
+		cache->complete_migration = complete_migration; /* FIXME */
+		break;
+
+	case CM_READ_ONLY:
+		DMERR("switching cache to read-only mode");
+		r = dm_cache_abort_metadata(cache->cmd);
+		if (r) {
+			DMERR("aborting transaction failed");
+			set_cache_mode(cache, CM_FAIL);
+		} else {
+			dm_cache_metadata_read_only(cache->cmd);
+			cache->process_bio = process_bio_read_only;
+			cache->process_discard = process_discard;
+			cache->process_flush = process_bio_read_only;
+			cache->issue_copy = issue_copy; /* FIXME */
+			cache->complete_migration = complete_migration; /* FIXME */
+		}
+		break;
+
+	case CM_WRITE:
+		cache->process_bio = process_bio;
+		cache->process_discard = process_discard;
+		cache->process_flush = process_flush;
+		cache->issue_copy = issue_copy;
+		cache->complete_migration = complete_migration;
+		break;
+	}
+}
+
+static int commit(struct cache_c *cache, unsigned *sb_flags)
+{
+	int r;
+
+	if (!sb_flags)
+		r = dm_cache_commit(cache->cmd);
+	else
+		r = dm_cache_commit_with_flags(cache->cmd, sb_flags);
+	if (r)
+		DMERR("commit failed, error = %d", r);
+
+	return r;
+}
+
+/*
+ * A non-zero return indicates read_only or fail_io mode.
+ * Many callers don't care about the return value.
+ */
+static int commit_or_fallback(struct cache_c *cache, unsigned *sb_flags)
+{
+	int r;
+
+	if (get_cache_mode(cache) != CM_WRITE)
+		return -EINVAL;
+
+	r = commit(cache, sb_flags);
+	if (r)
+		set_cache_mode(cache, CM_READ_ONLY);
+
+	return r;
+}
+
+/*----------------------------------------------------------------*/
+
 static int need_commit_due_to_time(struct cache_c *c)
 {
 	return jiffies < c->last_commit_jiffies ||
@@ -773,13 +895,13 @@ static void process_deferred_bios(struct cache_c *c)
 		}
 
 		if (bio->bi_rw & REQ_FLUSH)
-			process_flush_bio(c, bio);
+			c->process_flush(c, bio);
 
 		else if (bio->bi_rw & REQ_DISCARD)
-			process_discard_bio(c, bio);
+			c->process_discard(c, bio);
 
 		else
-			process_bio(c, bio);
+			c->process_bio(c, bio);
 	}
 }
 
@@ -802,7 +924,7 @@ static void process_deferred_flush_bios(struct cache_c *c)
 	if (bio_list_empty(&bios) && !need_commit_due_to_time(c))
 		return;
 
-	if (dm_cache_commit(c->cmd)) {
+	if (commit_or_fallback(c, NULL)) {
 		while ((bio = bio_list_pop(&bios)))
 			bio_io_error(bio);
 		return;
@@ -821,7 +943,7 @@ static void start_quiescing(struct cache_c *c)
 	unsigned long flags;
 
 	spin_lock_irqsave(&c->lock, flags);
-	c->quiescing = 1;
+	c->quiescing = true;
 	spin_unlock_irqrestore(&c->lock, flags);
 }
 
@@ -830,7 +952,7 @@ static void stop_quiescing(struct cache_c *c)
 	unsigned long flags;
 
 	spin_lock_irqsave(&c->lock, flags);
-	c->quiescing = 0;
+	c->quiescing = false;
 	spin_unlock_irqrestore(&c->lock, flags);
 }
 
@@ -888,12 +1010,12 @@ static void do_work(struct work_struct *ws)
 
 	do {
 		if (is_quiescing(c)) {
-			process_migrations(c, &c->quiesced_migrations, issue_copy);
-			process_migrations(c, &c->completed_migrations, complete_migration);
+			process_migrations(c, &c->quiesced_migrations, c->issue_copy);
+			process_migrations(c, &c->completed_migrations, c->complete_migration);
 		} else {
 			process_deferred_bios(c);
-			process_migrations(c, &c->quiesced_migrations, issue_copy);
-			process_migrations(c, &c->completed_migrations, complete_migration);
+			process_migrations(c, &c->quiesced_migrations, c->issue_copy);
+			process_migrations(c, &c->completed_migrations, c->complete_migration);
 			process_deferred_flush_bios(c);
 		}
 
@@ -1059,6 +1181,9 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad;
 	}
 
+	/* FIXME: need to preserve old mode... handover is missing */
+	set_cache_mode(c, CM_WRITE);
+
 	spin_lock_init(&c->lock);
 	bio_list_init(&c->deferred_bios);
 	bio_list_init(&c->deferred_flush_bios);
@@ -1136,7 +1261,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	dm_consume_args(&as, 5);
 
-	c->quiescing = 0;
+	c->quiescing = false;
 	c->last_commit_jiffies = jiffies;
 
 	atomic_set(&c->read_hit, 0);
@@ -1309,7 +1434,7 @@ static void cache_postsuspend(struct dm_target *ti)
 	}
 
 	sb_flags &= ~CACHE_DIRTY;
-	r = dm_cache_commit_with_flags(c->cmd, &sb_flags);
+	r = commit_or_fallback(c, &sb_flags);
 	if (r)
 		DMERR("could not clear dirty flag in metadata superblock");
 
@@ -1340,7 +1465,7 @@ static void cache_resume(struct dm_target *ti)
 		DMERR("cache metadata was not written cleanly during previous shutdown");
 
 	sb_flags &= CACHE_DIRTY;
-	r = dm_cache_commit_with_flags(c->cmd, &sb_flags);
+	r = commit_or_fallback(c, &sb_flags);
 	if (r)
 		DMERR("could not set dirty flag in metadata superblock");
 }
@@ -1360,7 +1485,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 	case STATUSTYPE_INFO:
 		/* Commit to ensure statistics aren't out-of-date */
 		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti)) {
-			r = dm_cache_commit(c->cmd);
+			r = commit_or_fallback(c, NULL);
 			if (r) {
 				DMERR("could not commit metadata");
 				return r;
