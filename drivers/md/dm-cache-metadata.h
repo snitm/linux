@@ -76,6 +76,12 @@ int dm_cache_get_free_metadata_block_count(struct dm_cache_metadata *cmd,
 int dm_cache_get_metadata_dev_size(struct dm_cache_metadata *cmd,
 				   dm_block_t *result);
 
+/*
+ * Flicks the underlying block manager into read only mode, so you know
+ * that nothing is changing.
+ */
+void dm_cache_metadata_read_only(struct dm_cache_metadata *cmd);
+
 /*----------------------------------------------------------------*/
 
 #endif

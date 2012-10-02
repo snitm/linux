@@ -84,6 +84,8 @@ struct dm_cache_metadata {
 	bool changed:1;
 	bool aborted_with_changes:1;
 
+	bool read_only:1;
+
 	/*
 	 * Set if a transaction has to be aborted but the attempt to roll back
 	 * to the previous (good) transaction failed.  The only cache metadata
@@ -511,6 +513,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	cmd->data_block_size = data_block_size;
 	cmd->cache_blocks = 0;
 	cmd->changed = true;
+	cmd->read_only = false;
 	cmd->fail_io = false;
 
 	r = __create_persistent_data_objects(cmd, may_format_device);
@@ -533,7 +536,7 @@ int dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 	int r;
 	unsigned sb_flags;
 
-	if (!cmd->fail_io) {
+	if (!pmd->read_only && !cmd->fail_io) {
 		dm_cache_read_superblock_flags(cmd, &sb_flags);
 		sb_flags &= ~CACHE_DIRTY;
 		r = __commit_transaction(cmd, &sb_flags);
@@ -801,4 +804,12 @@ int dm_cache_get_metadata_dev_size(struct dm_cache_metadata *cmd,
 	up_read(&cmd->root_lock);
 
 	return r;
+}
+
+void dm_cache_metadata_read_only(struct dm_cache_metadata *cmd)
+{
+	down_write(&cmd->root_lock);
+	cmd->read_only = true;
+	dm_bm_set_read_only(cmd->bm);
+	up_write(&cmd->root_lock);
 }
