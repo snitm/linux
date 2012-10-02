@@ -536,7 +536,7 @@ int dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 	int r;
 	unsigned sb_flags;
 
-	if (!pmd->read_only && !cmd->fail_io) {
+	if (!cmd->read_only && !cmd->fail_io) {
 		dm_cache_read_superblock_flags(cmd, &sb_flags);
 		sb_flags &= ~CACHE_DIRTY;
 		r = __commit_transaction(cmd, &sb_flags);

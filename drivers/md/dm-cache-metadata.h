@@ -68,6 +68,8 @@ int dm_cache_commit_with_flags(struct dm_cache_metadata *cmd, unsigned *flags);
 
 int dm_cache_commit(struct dm_cache_metadata *cmd);
 
+int dm_cache_abort_metadata(struct dm_cache_metadata *cmd);
+
 bool dm_cache_aborted_changes(struct dm_cache_metadata *cmd);
 
 int dm_cache_get_free_metadata_block_count(struct dm_cache_metadata *cmd,
