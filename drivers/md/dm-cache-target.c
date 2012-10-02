@@ -286,12 +286,28 @@ static void issue(struct cache_c *c, struct bio *bio)
 {
 	unsigned long flags;
 
-	if (bio_triggers_commit(c, bio)) {
-		spin_lock_irqsave(&c->lock, flags);
-		bio_list_add(&c->deferred_flush_bios, bio);
-		spin_unlock_irqrestore(&c->lock, flags);
-	} else
+	if (!bio_triggers_commit(c, bio)) {
 		generic_make_request(bio);
+		return;
+	}
+
+	/*
+	 * Complete bio with an error if earlier I/O caused changes to
+	 * the metadata that can't be committed e.g, due to I/O errors
+	 * on the metadata device.
+	 */
+	if (dm_cache_aborted_changes(c->cmd)) {
+		bio_io_error(bio);
+		return;
+	}
+
+	/*
+	 * Batch together any bios that trigger commits and then issue a
+	 * single commit for them in process_deferred_flush_bios().
+	 */
+	spin_lock_irqsave(&c->lock, flags);
+	bio_list_add(&c->deferred_flush_bios, bio);
+	spin_unlock_irqrestore(&c->lock, flags);
 }
 
 /*----------------------------------------------------------------
@@ -300,7 +316,7 @@ static void issue(struct cache_c *c, struct bio *bio)
  * Migration covers moving data from the origin device to the cache, or
  * vice versa.
  *--------------------------------------------------------------*/
-static int prealloc_migration(struct cache_c *c)
+static int ensure_next_migration(struct cache_c *c)
 {
 	if (c->next_migration)
 		return 0;
@@ -732,8 +748,8 @@ static int need_commit_due_to_time(struct cache_c *c)
 static void process_deferred_bios(struct cache_c *c)
 {
 	unsigned long flags;
-	struct bio_list bios;
 	struct bio *bio;
+	struct bio_list bios;
 
 	bio_list_init(&bios);
 
@@ -748,7 +764,7 @@ static void process_deferred_bios(struct cache_c *c)
 		 * this bio might require one, we pause until there are some
 		 * prepared mappings to process.
 		 */
-		if (prealloc_migration(c)) {
+		if (ensure_next_migration(c)) {
 			spin_lock_irqsave(&c->lock, flags);
 			bio_list_merge(&c->deferred_bios, &bios);
 			spin_unlock_irqrestore(&c->lock, flags);
@@ -770,11 +786,14 @@ static void process_deferred_bios(struct cache_c *c)
 static void process_deferred_flush_bios(struct cache_c *c)
 {
 	unsigned long flags;
-	struct bio_list bios;
 	struct bio *bio;
+	struct bio_list bios;
 
+	/*
+	 * If there are any deferred flush bios, we must commit
+	 * the metadata before issuing them.
+	 */
 	bio_list_init(&bios);
-
 	spin_lock_irqsave(&c->lock, flags);
 	bio_list_merge(&bios, &c->deferred_flush_bios);
 	bio_list_init(&c->deferred_flush_bios);
