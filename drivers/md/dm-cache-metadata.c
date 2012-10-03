@@ -70,12 +70,12 @@ struct cache_disk_superblock {
 } __packed;
 
 struct dm_cache_metadata {
+	struct dm_array_info info;
+
 	struct block_device *bdev;
 	struct dm_block_manager *bm;
 	struct dm_space_map *metadata_sm;
 	struct dm_transaction_manager *tm;
-
-	struct dm_array_info info;
 
 	struct rw_semaphore root_lock;
 	dm_block_t root;
@@ -586,9 +586,9 @@ static int __remove(struct dm_cache_metadata *cmd, dm_block_t cblock)
 {
 	int r;
 	__le64 value = pack_value(0, 0);
-
-	debug("__remove %lu\n", (unsigned long) oblock);
 	__dm_bless_for_disk(&value);
+
+	debug("__remove %lu\n", (unsigned long) cblock);
 	r = dm_array_set(&cmd->info, cmd->root, cblock, &value, &cmd->root);
 	if (r)
 		return r;
@@ -616,7 +616,7 @@ static int __insert(struct dm_cache_metadata *cmd,
 	__le64 value = pack_value(oblock, M_VALID);
 	__dm_bless_for_disk(&value);
 
-	debug("__insert %lu -> %lu\n", (unsigned long) oblock, (unsigned long) cblock);
+	debug("__insert %lu -> %lu\n", (unsigned long) cblock, (unsigned long) oblock);
 	r = dm_array_set(&cmd->info, cmd->root, cblock, &value, &cmd->root);
 	if (r)
 		return r;
