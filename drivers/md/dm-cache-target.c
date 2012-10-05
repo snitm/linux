@@ -446,7 +446,7 @@ static void migration_success(struct cache_c *c, struct dm_cache_migration *mg)
 		cell_defer(c, mg->new_ocell, 1);
 
 		if (dm_cache_insert_mapping(c->cmd, mg->cblock, mg->new_oblock)) {
-			DMWARN("promotion failed; couldn't update on disk metadata");
+			DMWARN_LIMIT("promotion failed; couldn't update on disk metadata");
 			policy_remove_mapping(c->policy, mg->new_oblock);
 		}
 

@@ -40,12 +40,12 @@ enum mapping_bits {
 	 * A valid mapping.  Because we're using an array we clear this
 	 * flag for an non existant mapping.
 	 */
-	M_VALID,
+	M_VALID = 1,
 
 	/*
 	 * The data on the cache is different from that on the origin.
 	 */
-	M_DIRTY
+	M_DIRTY = 2
 };
 
 struct cache_disk_superblock {
@@ -253,6 +253,7 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	disk_super->metadata_block_size = cpu_to_le32(CACHE_METADATA_BLOCK_SIZE >> SECTOR_SHIFT);
 	disk_super->data_block_size = cpu_to_le32(cmd->data_block_size);
 	disk_super->cache_blocks = cpu_to_le32(0);
+
 	return dm_tm_commit(cmd->tm, sblock);
 
 bad_locked:
@@ -482,14 +483,17 @@ static int __commit_transaction(struct dm_cache_metadata *cmd, unsigned *flags)
 
 static __le64 pack_value(dm_block_t block, unsigned flags)
 {
-	dm_block_t value = (block << 16) | (flags & FLAGS_MASK);
+	uint64_t value = block;
+	value <<= 16;
+	value = value | (flags & FLAGS_MASK);
 	return cpu_to_le64(value);
 }
 
 static void unpack_value(__le64 value_le, dm_block_t *block, unsigned *flags)
 {
-	dm_block_t value = le64_to_cpu(value_le);
-	*block = value >> 16;
+	uint64_t value = le64_to_cpu(value_le);
+	*block = value;
+	*block >>= 16;
 	*flags = value & FLAGS_MASK;
 }
 
@@ -545,8 +549,10 @@ int dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 			       __func__, r);
 	}
 
-	if (!cmd->fail_io)
+	if (!cmd->fail_io) {
+		dm_cache_dump(cmd);
 		__destroy_persistent_data_objects(cmd);
+	}
 
 	kfree(cmd);
 	return 0;
@@ -613,6 +619,7 @@ static int __insert(struct dm_cache_metadata *cmd,
 		    dm_block_t cblock, dm_block_t oblock)
 {
 	int r;
+	unsigned flags;
 	__le64 value = pack_value(oblock, M_VALID);
 	__dm_bless_for_disk(&value);
 
@@ -621,6 +628,13 @@ static int __insert(struct dm_cache_metadata *cmd,
 	if (r)
 		return r;
 
+	// FIXME: remove
+	value = cpu_to_le64(0);
+	r = dm_array_get(&cmd->info, cmd->root, cblock, &value);
+	if (r)
+		return r;
+
+	unpack_value(value, &oblock, &flags);
 	cmd->changed = true;
 	return 0;
 }
@@ -685,6 +699,34 @@ int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
 	debug("< dm_cache_load_mappings\n");
 
 	return r;
+}
+
+static int __dump_mapping(void *context, uint64_t cblock, void *leaf)
+{
+	int r = 0;
+	__le64 value;
+	dm_block_t oblock;
+	unsigned flags;
+
+	memcpy(&value, leaf, sizeof(value));
+	unpack_value(value, &oblock, &flags);
+
+	if (flags & M_VALID)
+		pr_alert("%p o(%u) -> c(%u)\n", leaf, (unsigned) oblock, (unsigned) cblock);
+
+	return r;
+}
+
+static int __dump_mappings(struct dm_cache_metadata *cmd)
+{
+	return dm_array_walk(&cmd->info, cmd->root, __dump_mapping, NULL);
+}
+
+void dm_cache_dump(struct dm_cache_metadata *cmd)
+{
+	down_read(&cmd->root_lock);
+	__dump_mappings(cmd);
+	up_read(&cmd->root_lock);
 }
 
 int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd)

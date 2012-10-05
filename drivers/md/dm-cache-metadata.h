@@ -84,6 +84,8 @@ int dm_cache_get_metadata_dev_size(struct dm_cache_metadata *cmd,
  */
 void dm_cache_metadata_read_only(struct dm_cache_metadata *cmd);
 
+void dm_cache_dump(struct dm_cache_metadata *cmd);
+
 /*----------------------------------------------------------------*/
 
 #endif
