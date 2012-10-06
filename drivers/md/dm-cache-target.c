@@ -1771,16 +1771,18 @@ static void cache_postsuspend(struct dm_target *ti)
 	struct cache_c *c = ti->private;
 	struct cache *cache = c->cache;
 
-	r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
-	if (r) {
-		DMERR("could not read superblock flags during suspend");
-		return;
-	}
+	if (get_cache_mode(cache) == CM_WRITE) {
+		r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
+		if (r) {
+			DMERR("could not read superblock flags during suspend");
+			return;
+		}
 
-	sb_flags &= ~CACHE_DIRTY;
-	r = commit_or_fallback(cache, &sb_flags);
-	if (r)
-		DMERR("could not clear dirty flag in metadata superblock");
+		sb_flags &= ~CACHE_DIRTY;
+		r = commit_or_fallback(cache, &sb_flags);
+		if (r)
+			DMERR("could not clear dirty flag in metadata superblock");
+	}
 
 	start_quiescing(cache);
 	wait_for_migrations(cache);
@@ -1820,15 +1822,16 @@ static void cache_resume(struct dm_target *ti)
 		DMERR("could not read superblock flags during resume");
 		return;
 	}
-
 	if (sb_flags & CACHE_DIRTY)
 		/* FIXME: perform cache policy recovery */
 		DMERR("cache metadata was not written cleanly during previous shutdown");
 
-	sb_flags &= CACHE_DIRTY;
-	r = commit_or_fallback(cache, &sb_flags);
-	if (r)
-		DMERR("could not set dirty flag in metadata superblock");
+	if (get_cache_mode(cache) == CM_WRITE) {
+		sb_flags &= CACHE_DIRTY;
+		r = commit_or_fallback(cache, &sb_flags);
+		if (r)
+			DMERR("could not set dirty flag in metadata superblock");
+	}
 }
 
 static void emit_flags(struct cache_features *cf, char *result,
@@ -1856,13 +1859,8 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 	switch (type) {
 	case STATUSTYPE_INFO:
 		/* Commit to ensure statistics aren't out-of-date */
-		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti)) {
-			r = commit_or_fallback(cache, NULL);
-			if (r) {
-				DMERR("could not commit metadata");
-				return r;
-			}
-		}
+		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti))
+			(void) commit_or_fallback(cache, NULL);
 
 		r = dm_cache_get_free_metadata_block_count(cache->cmd,
 							   &nr_free_blocks_metadata);
