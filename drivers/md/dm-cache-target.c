@@ -1211,6 +1211,7 @@ static void __cache_destroy(struct cache *cache)
 	mempool_destroy(cache->migration_pool);
 	mempool_destroy(cache->endio_hook_pool);
 	dm_deferred_set_destroy(cache->all_io_ds);
+	dm_cache_policy_destroy(cache->policy);
 	kfree(cache);
 }
 
