@@ -1830,6 +1830,16 @@ static void cache_resume(struct dm_target *ti)
 		DMERR("could not set dirty flag in metadata superblock");
 }
 
+static void emit_flags(struct cache_features *cf, char *result,
+		       unsigned sz, unsigned maxlen)
+{
+	unsigned count = (cf->mode == CM_READ_ONLY);
+	DMEMIT("%u ", count);
+
+	if (cf->mode == CM_READ_ONLY)
+		DMEMIT("read_only ");
+}
+
 static int cache_status(struct dm_target *ti, status_type_t type,
 			unsigned status_flags, char *result, unsigned maxlen)
 {
@@ -1864,7 +1874,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%llu/%llu %u %u %u %u %u %u %llu %u",
+		DMEMIT("%llu/%llu %u %u %u %u %u %u %llu %u ",
 		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
 		       (unsigned long long)nr_blocks_metadata,
 		       (unsigned) atomic_read(&cache->read_hit),
@@ -1875,6 +1885,12 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned) atomic_read(&cache->promotion),
 		       (unsigned long long) residency,
 		       (unsigned) atomic_read(&cache->cache_cell_clash));
+
+		if (cache->cf.mode == CM_READ_ONLY)
+			DMEMIT("ro ");
+		else
+			DMEMIT("rw ");
+
 		break;
 
 	case STATUSTYPE_TABLE:
@@ -1885,7 +1901,9 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		format_dev_t(buf, c->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
 		DMEMIT("%llu ", (unsigned long long) cache->sectors_per_block);
-		DMEMIT("%s", dm_cache_policy_get_name(cache->policy));
+		DMEMIT("%s ", dm_cache_policy_get_name(cache->policy));
+		emit_flags(&c->requested_cf, result, sz, maxlen);
+		break;
 	}
 
 	return 0;
