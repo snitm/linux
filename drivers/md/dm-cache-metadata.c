@@ -356,7 +356,8 @@ bad:
 	return r;
 }
 
-static int __open_or_format_metadata(struct dm_cache_metadata *cmd, bool format_device)
+static int __open_or_format_metadata(struct dm_cache_metadata *cmd,
+				     bool format_device)
 {
 	int r, unformatted;
 
@@ -370,7 +371,8 @@ static int __open_or_format_metadata(struct dm_cache_metadata *cmd, bool format_
 	return __open_metadata(cmd);
 }
 
-static int __create_persistent_data_objects(struct dm_cache_metadata *cmd, bool may_format_device)
+static int __create_persistent_data_objects(struct dm_cache_metadata *cmd,
+					    bool may_format_device)
 {
 	int r;
 	cmd->bm = dm_block_manager_create(cmd->bdev, CACHE_METADATA_BLOCK_SIZE,
@@ -509,7 +511,7 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	cmd = kmalloc(sizeof(*cmd), GFP_KERNEL);
 	if (!cmd) {
 		DMERR("could not allocate metadata struct");
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	init_rwsem(&cmd->root_lock);
@@ -523,13 +525,14 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 	r = __create_persistent_data_objects(cmd, may_format_device);
 	if (r) {
 		kfree(cmd);
-		return NULL;
+		return ERR_PTR(r);
 	}
 
 	r = __begin_transaction(cmd);
 	if (r < 0) {
-		dm_cache_metadata_close(cmd);
-		return NULL;
+		if (dm_cache_metadata_close(cmd) < 0)
+			DMWARN("%s: dm_cache_metadata_close() failed.", __func__);
+		return ERR_PTR(r);
 	}
 
 	return cmd;

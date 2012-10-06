@@ -1645,12 +1645,16 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	bio_list_init(&pool->retry_on_resume_list);
 
 	pool->shared_read_ds = dm_deferred_set_create();
-	if (!pool->shared_read_ds)
+	if (!pool->shared_read_ds) {
+		err_p = ERR_PTR(-ENOMEM);
 		goto bad_shared_read_ds;
+	}
 
 	pool->all_io_ds = dm_deferred_set_create();
-	if (!pool->all_io_ds)
+	if (!pool->all_io_ds) {
+		err_p = ERR_PTR(-ENOMEM);
 		goto bad_all_io_ds;
+	}
 
 	pool->next_mapping = NULL;
 	pool->mapping_pool = mempool_create_slab_pool(MAPPING_POOL_SIZE,
@@ -1769,7 +1773,7 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 	const char *arg_name;
 
 	static struct dm_arg _args[] = {
-		{0, 3, "Invalid number of pool feature arguments"},
+		{0, 4, "Invalid number of pool feature arguments"},
 	};
 
 	/*
@@ -1818,6 +1822,7 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
  *	     skip_block_zeroing: skips the zeroing of newly-provisioned blocks.
  *	     ignore_discard: disable discard
  *	     no_discard_passdown: don't pass discards down to the data device
+ *	     read_only : don't allow any changes to the pool
  */
 static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
