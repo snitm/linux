@@ -1243,6 +1243,7 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 	}
 
 	cache->cmd = cmd;
+	cache_features_init(&cache->cf);
 
 	cache->origin_blocks = origin_sectors;
 	do_div(cache->origin_blocks, block_size);
