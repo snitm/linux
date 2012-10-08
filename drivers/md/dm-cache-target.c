@@ -60,12 +60,16 @@ static void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
-#define BLOCK_SIZE_MIN 64
 #define PRISON_CELLS 1024
 #define ENDIO_HOOK_POOL_SIZE 1024
 #define MIGRATION_POOL_SIZE 128
 #define COMMIT_PERIOD HZ
 #define MIGRATION_COUNT_WINDOW 10
+
+/*
+ * The block size of the device holding cache data must be >= 32KB
+ */
+#define DATA_DEV_BLOCK_SIZE_MIN_SECTORS (32 * 1024 >> SECTOR_SHIFT)
 
 /*
  * The cache runs in 3 modes.  Ordered in degraded order for comparisons.
@@ -1546,8 +1550,8 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	as.argv = argv;
 
 	if (kstrtoul(argv[3], 10, &block_size) || !block_size ||
-	    block_size < BLOCK_SIZE_MIN ||
-	    !is_power_of_2(block_size)) {
+	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
+	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
 		ti->error = "Invalid data block size";
 		r = -EINVAL;
 		goto bad_unlock;
