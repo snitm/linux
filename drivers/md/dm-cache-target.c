@@ -116,8 +116,7 @@ struct cache {
 	 * Fields for converting from sectors to blocks.
 	 */
 	sector_t sectors_per_block;
-	sector_t offset_mask;
-	unsigned int block_shift;
+	int sectors_per_block_shift;
 
 	spinlock_t lock;
 	struct bio_list deferred_bios;
@@ -342,9 +341,11 @@ static void remap_to_cache(struct cache_c *c, struct bio *bio,
 			   dm_block_t cblock)
 {
 	struct cache *cache = c->cache;
+	sector_t bi_sector = bio->bi_sector;
 
 	bio->bi_bdev = c->cache_dev->bdev;
-	bio->bi_sector = (cblock << cache->block_shift) + (bio->bi_sector & cache->offset_mask);
+	bio->bi_sector = (cblock << cache->sectors_per_block_shift) |
+		        (bi_sector & (cache->sectors_per_block - 1));
 }
 
 static void check_if_tick_bio_needed(struct cache_c *c, struct bio *bio)
@@ -385,7 +386,7 @@ static void remap_to_cache_dirty(struct cache_c *c, struct bio *bio,
 
 static dm_block_t get_bio_block(struct cache_c *c, struct bio *bio)
 {
-	return bio->bi_sector >> c->cache->block_shift;
+	return bio->bi_sector >> c->cache->sectors_per_block_shift;
 }
 
 static int bio_triggers_commit(struct cache_c *c, struct bio *bio)
@@ -764,14 +765,6 @@ static void process_flush(struct cache_c *c, struct bio *bio)
 
 	issue(c, bio);
 }
-
-#if 0
-static bool covers_block(struct cache_c *c, struct bio *bio)
-{
-	return !(bio->bi_sector & c->offset_mask) &&
-		(bio->bi_size == (c->sectors_per_block << SECTOR_SHIFT));
-}
-#endif
 
 /*
  * People generally discard large parts of a device, eg, the whole device
@@ -1248,9 +1241,8 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 	cache->origin_blocks = origin_sectors;
 	do_div(cache->origin_blocks, block_size);
 	cache->sectors_per_block = block_size;
-	cache->offset_mask = block_size - 1;
-	cache->block_shift = ffs(block_size) - 1;
-	cache->cache_size = cache_sectors >> cache->block_shift;
+	cache->sectors_per_block_shift = ffs(block_size) - 1;
+	cache->cache_size = cache_sectors >> cache->sectors_per_block_shift;
 
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
