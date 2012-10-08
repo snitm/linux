@@ -1858,6 +1858,11 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
+		if (get_cache_mode(cache) == CM_FAIL) {
+			DMEMIT("Fail");
+			break;
+		}
+
 		/* Commit to ensure statistics aren't out-of-date */
 		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti))
 			(void) commit_or_fallback(cache, NULL);
