@@ -83,6 +83,8 @@ enum cache_mode {
 
 struct cache_features {
 	enum cache_mode mode;
+
+	bool discard_enabled:1;
 };
 
 struct cache_c;
@@ -1179,6 +1181,7 @@ static void unbind_control_target(struct cache *cache, struct dm_target *ti)
 static void cache_features_init(struct cache_features *cf)
 {
 	cf->mode = CM_WRITE;
+	cf->discard_enabled = true;
 }
 
 static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock)
@@ -1480,7 +1483,7 @@ static int parse_cache_features(struct dm_arg_set *as, struct cache_features *cf
 	const char *arg_name;
 
 	static struct dm_arg _args[] = {
-		{0, 1, "Invalid number of cache feature arguments"},
+		{0, 2, "Invalid number of cache feature arguments"},
 	};
 
 	/*
@@ -1497,7 +1500,10 @@ static int parse_cache_features(struct dm_arg_set *as, struct cache_features *cf
 		arg_name = dm_shift_arg(as);
 		argc--;
 
-		if (!strcasecmp(arg_name, "read_only"))
+		if (!strcasecmp(arg_name, "ignore_discard"))
+			cf->discard_enabled = false;
+
+		else if (!strcasecmp(arg_name, "read_only"))
 			cf->mode = CM_READ_ONLY;
 
 		else {
@@ -1523,6 +1529,7 @@ static int parse_cache_features(struct dm_arg_set *as, struct cache_features *cf
  * policy	   : the replacement policy to use
  *
  * Optional feature arguments are:
+ *	 ignore_discard: disable discard
  *	 read_only : don't allow any changes to the cache
  */
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
@@ -1621,10 +1628,11 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	ti->num_flush_requests = 2;
 	ti->flush_supported = true;
 
-	/* FIXME: make discard support configurable */
-	ti->num_discard_requests = 1;
-	ti->discards_supported = true;
-
+	if (cf.discard_enabled) {
+		ti->num_discard_requests = 1;
+		ti->discards_supported = true;
+		ti->discard_zeroes_data_unsupported = true;
+	}
 	ti->private = c;
 
 	c->callbacks.congested_fn = cache_is_congested;
@@ -1833,8 +1841,11 @@ static void cache_resume(struct dm_target *ti)
 static void emit_flags(struct cache_features *cf, char *result,
 		       unsigned sz, unsigned maxlen)
 {
-	unsigned count = (cf->mode == CM_READ_ONLY);
+	unsigned count = !cf->discard_enabled + (cf->mode == CM_READ_ONLY);
 	DMEMIT("%u ", count);
+
+	if (!cf->discard_enabled)
+		DMEMIT("ignore_discard ");
 
 	if (cf->mode == CM_READ_ONLY)
 		DMEMIT("read_only ");
@@ -1936,23 +1947,17 @@ static int cache_bvec_merge(struct dm_target *ti,
 	return min(max_size, q->merge_bvec_fn(q, bvm, biovec));
 }
 
-/* FIXME: fix discard settings like was done for thinp */
 static void set_discard_limits(struct cache_c *c, struct queue_limits *limits)
 {
 	struct cache *cache = c->cache;
 
-	/*
-	 * FIXME: these limits may be incompatible with the cache's data device
-	 */
+	/* FIXME: why use a multiplier of 1024 here ? */
 	limits->max_discard_sectors = cache->sectors_per_block * 1024;
 
 	/*
-	 * This is just a hint, and not enforced.  We have to cope with
-	 * bios that cover a block partially.  A discard that spans a block
-	 * boundary is not sent to this target.
+	 * discard_granularity is just a hint, and not enforced.
 	 */
 	limits->discard_granularity = cache->sectors_per_block << SECTOR_SHIFT;
-	limits->discard_zeroes_data = 0;
 }
 
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
@@ -1962,6 +1967,15 @@ static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	blk_limits_io_min(limits, 0);
 	blk_limits_io_opt(limits, cache->sectors_per_block << SECTOR_SHIFT);
+
+	/*
+	 * c->adjusted_cf is a staging area for the actual features to use.
+	 * They get transferred to the live cache in bind_control_target()
+	 * called from cache_preresume().
+	 */
+	if (!c->adjusted_cf.discard_enabled)
+		return;
+
 	set_discard_limits(c, limits);
 }
 
