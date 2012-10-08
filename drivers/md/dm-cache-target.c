@@ -338,6 +338,11 @@ static bool is_discarded(struct cache *cache, dm_block_t b)
 /*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
+static bool block_size_is_power_of_two(struct cache *cache)
+{
+	return cache->sectors_per_block_shift >= 0;
+}
+
 static void remap_to_origin(struct cache_c *c, struct bio *bio)
 {
 	bio->bi_bdev = c->origin_dev->bdev;
@@ -350,8 +355,12 @@ static void remap_to_cache(struct cache_c *c, struct bio *bio,
 	sector_t bi_sector = bio->bi_sector;
 
 	bio->bi_bdev = c->cache_dev->bdev;
-	bio->bi_sector = (cblock << cache->sectors_per_block_shift) |
-		        (bi_sector & (cache->sectors_per_block - 1));
+	if (!block_size_is_power_of_two(cache))
+		bio->bi_sector = (cblock * cache->sectors_per_block) +
+				sector_div(bi_sector, cache->sectors_per_block);
+	else
+		bio->bi_sector = (cblock << cache->sectors_per_block_shift) |
+				(bi_sector & (cache->sectors_per_block - 1));
 }
 
 static void check_if_tick_bio_needed(struct cache_c *c, struct bio *bio)
@@ -392,7 +401,14 @@ static void remap_to_cache_dirty(struct cache_c *c, struct bio *bio,
 
 static dm_block_t get_bio_block(struct cache_c *c, struct bio *bio)
 {
-	return bio->bi_sector >> c->cache->sectors_per_block_shift;
+	sector_t block_nr = bio->bi_sector;
+
+	if (!block_size_is_power_of_two(c->cache))
+		(void) sector_div(block_nr, c->cache->sectors_per_block);
+	else
+		block_nr >>= c->cache->sectors_per_block_shift;
+
+	return block_nr;
 }
 
 static int bio_triggers_commit(struct cache_c *c, struct bio *bio)
@@ -1248,8 +1264,16 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 	cache->origin_blocks = origin_sectors;
 	do_div(cache->origin_blocks, block_size);
 	cache->sectors_per_block = block_size;
-	cache->sectors_per_block_shift = ffs(block_size) - 1;
-	cache->cache_size = cache_sectors >> cache->sectors_per_block_shift;
+	if (block_size & (block_size - 1)) {
+		dm_block_t cache_size = cache_sectors;
+
+		cache->sectors_per_block_shift = -1;
+		(void) sector_div(cache_size, block_size);
+		cache->cache_size = cache_size;
+	} else {
+		cache->sectors_per_block_shift = __ffs(block_size);
+		cache->cache_size = cache_sectors >> cache->sectors_per_block_shift;
+	}
 
 	spin_lock_init(&cache->lock);
 	bio_list_init(&cache->deferred_bios);
@@ -1957,7 +1981,15 @@ static void set_discard_limits(struct cache_c *c, struct queue_limits *limits)
 	/*
 	 * discard_granularity is just a hint, and not enforced.
 	 */
-	limits->discard_granularity = cache->sectors_per_block << SECTOR_SHIFT;
+	if (block_size_is_power_of_two(cache))
+		limits->discard_granularity = cache->sectors_per_block << SECTOR_SHIFT;
+	else
+		/*
+		 * Use largest power of 2 that is a factor of sectors_per_block
+		 * but at least DATA_DEV_BLOCK_SIZE_MIN_SECTORS.
+		 */
+		limits->discard_granularity = max(1 << __ffs(cache->sectors_per_block),
+						  DATA_DEV_BLOCK_SIZE_MIN_SECTORS) << SECTOR_SHIFT;
 }
 
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
