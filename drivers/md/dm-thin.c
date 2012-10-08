@@ -1646,12 +1646,14 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 
 	pool->shared_read_ds = dm_deferred_set_create();
 	if (!pool->shared_read_ds) {
+		*error = "Error creating pool's shared read deferred set";
 		err_p = ERR_PTR(-ENOMEM);
 		goto bad_shared_read_ds;
 	}
 
 	pool->all_io_ds = dm_deferred_set_create();
 	if (!pool->all_io_ds) {
+		*error = "Error creating pool's all io deferred set";
 		err_p = ERR_PTR(-ENOMEM);
 		goto bad_all_io_ds;
 	}
@@ -1773,7 +1775,7 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 	const char *arg_name;
 
 	static struct dm_arg _args[] = {
-		{0, 4, "Invalid number of pool feature arguments"},
+		{0, 3, "Invalid number of pool feature arguments"},
 	};
 
 	/*
