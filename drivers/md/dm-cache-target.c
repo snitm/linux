@@ -1822,12 +1822,6 @@ static void cache_postsuspend(struct dm_target *ti)
 	struct cache_c *c = ti->private;
 	struct cache *cache = c->cache;
 
-	r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
-	if (r) {
-		DMERR("could not read superblock flags during suspend");
-		goto finish_suspend;
-	}
-
 	policy_name = dm_cache_policy_get_name(cache->policy);
 	r = dm_cache_metadata_write_policy_name(cache->cmd, policy_name);
 	if (r) {
@@ -1837,12 +1831,16 @@ static void cache_postsuspend(struct dm_target *ti)
 
 	/* TODO: write the cache policy's hints to disk here */
 
-	sb_flags &= ~CACHE_DIRTY;
-	r = commit_or_fallback(cache, &sb_flags);
+	r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
 	if (r) {
-		DMERR("could not clear dirty flag in metadata superblock");
+		DMERR("could not read superblock flags during suspend");
 		goto finish_suspend;
 	}
+
+	sb_flags &= ~CACHE_DIRTY;
+	r = commit_or_fallback(cache, &sb_flags);
+	if (r)
+		DMERR("could not clear dirty flag in metadata superblock");
 
 finish_suspend:
 	start_quiescing(cache);
@@ -1855,6 +1853,7 @@ finish_suspend:
 static int cache_preresume(struct dm_target *ti)
 {
 	int r;
+	unsigned sb_flags;
 	struct cache_c *c = ti->private;
 	struct cache *cache = c->cache;
 
@@ -1865,23 +1864,10 @@ static int cache_preresume(struct dm_target *ti)
 	if (r)
 		return r;
 
-	return 0;
-}
-
-static void cache_resume(struct dm_target *ti)
-{
-	int r;
-	unsigned sb_flags;
-	struct cache_c *c = ti->private;
-	struct cache *cache = c->cache;
-
-	cache->need_tick_bio = true;
-	do_waker(&cache->waker.work);
-
 	r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
 	if (r) {
 		DMERR("could not read superblock flags during resume");
-		return;
+		return r;
 	}
 	if (sb_flags & CACHE_DIRTY)
 		/* TODO: perform cache policy recovery */
@@ -1900,10 +1886,23 @@ static void cache_resume(struct dm_target *ti)
 		}
 		cache->policy = cache->inactive_policy;
 		cache->inactive_policy = NULL;
-		if (dm_cache_load_mappings(cache->cmd, load_mapping, cache))
-			/* FIXME: likely need to set some internal invalid flag or? */
-			DMERR("Couldn't load cache mappings");
+		r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
+		if (r) {
+			DMERR("could not load cache mappings");
+			return r;
+		}
 	}
+
+	return 0;
+}
+
+static void cache_resume(struct dm_target *ti)
+{
+	struct cache_c *c = ti->private;
+	struct cache *cache = c->cache;
+
+	cache->need_tick_bio = true;
+	do_waker(&cache->waker.work);
 }
 
 static void emit_flags(struct cache_features *cf, char *result,
