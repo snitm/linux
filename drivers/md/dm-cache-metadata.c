@@ -59,7 +59,7 @@ struct cache_disk_superblock {
 	__le64 magic;
 	__le32 version;
 
-	__u8 policy_name[16];
+	__u8 policy_name[POLICY_NAME_SIZE];
 
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
 	__le64 mapping_root;
