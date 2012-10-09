@@ -204,6 +204,7 @@ struct cache_c {
 
 /*
  * A global list of caches that uses a struct mapped_device as a key.
+ * This list is a means to hand-over an existing cache object on table reload.
  * FIXME: factor out to common code and share with dm_thin_pool_table
  */
 static struct dm_cache_table {
