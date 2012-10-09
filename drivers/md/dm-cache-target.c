@@ -163,6 +163,8 @@ struct cache {
 	bool quiescing:1;
 
 	unsigned ref_count;
+
+	struct dm_cache_policy *inactive_policy;
 	struct dm_cache_policy *policy;
 
 	atomic_t read_hit;
@@ -1253,7 +1255,7 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 		return (struct cache *)cmd;
 	}
 
-	cache = kmalloc(sizeof(*cache), GFP_KERNEL);
+	cache = kzalloc(sizeof(*cache), GFP_KERNEL);
 	if (!cache) {
 		*error = "Error allocating memory for cache";
 		goto bad_cache;
@@ -1306,7 +1308,7 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
 		*error = "Couldn't create kcopyd client";
-		err_p = ERR_PTR(r);
+		err_p = cache->copier;
 		goto bad_kcopyd_client;
 	}
 
@@ -1344,13 +1346,6 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 		goto bad_migration_pool;
 	}
 
-	cache->policy = dm_cache_policy_create(policy_name, cache->cache_size,
-					       cache->origin_sectors, block_size);
-	if (!cache->policy) {
-		*error = "Error creating cache's policy";
-		goto bad_cache_policy;
-	}
-
 	atomic_set(&cache->read_hit, 0);
 	atomic_set(&cache->read_miss, 0);
 	atomic_set(&cache->write_hit, 0);
@@ -1359,12 +1354,6 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 	atomic_set(&cache->promotion, 0);
 	atomic_set(&cache->copies_avoided, 0);
 	atomic_set(&cache->cache_cell_clash, 0);
-
-	r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
-	if (r) {
-		*error = "Couldn't load cache mappings";
-		goto bad_load_mappings;
-	}
 
 	cache->ref_count = 1;
 	cache->quiescing = false;
@@ -1375,10 +1364,6 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 
 	return cache;
 
-bad_load_mappings:
-	dm_cache_policy_destroy(cache->policy);
-bad_cache_policy:
-	mempool_destroy(cache->migration_pool);
 bad_migration_pool:
 	mempool_destroy(cache->endio_hook_pool);
 bad_endio_hook_pool:
@@ -1449,6 +1434,38 @@ static struct cache *__cache_find(struct mapped_device *cache_md,
 	}
 
 	return cache;
+}
+
+static int create_inactive_cache_policy(struct cache *cache, const char *policy_name,
+					char **error)
+{
+	const char *old_policy_name;
+
+	old_policy_name = dm_cache_metadata_read_policy_name(cache->cmd);
+	if (IS_ERR(old_policy_name)) {
+		*error = "Error reading cache's policy name from metadata";
+		return PTR_ERR(old_policy_name);
+	}
+
+	if (cache->inactive_policy) {
+		/* cleanup previous table load's inactive policy */
+		dm_cache_policy_destroy(cache->inactive_policy);
+		cache->inactive_policy = NULL;
+	}
+
+	if (cache->policy && old_policy_name && !strcasecmp(old_policy_name, policy_name))
+		/* policy isn't being switched, keep existing active policy */
+		return 0;
+
+	cache->inactive_policy = dm_cache_policy_create(policy_name, cache->cache_size,
+							cache->origin_sectors,
+							cache->sectors_per_block);
+	if (!cache->inactive_policy) {
+		*error = "Error creating cache's new policy";
+		return -ENOMEM;
+	}
+
+	return 0;
 }
 
 /*----------------------------------------------------------------
@@ -1644,6 +1661,10 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
 		goto bad_max_io_len;
 
+	r = create_inactive_cache_policy(cache, policy_name, &ti->error);
+	if (r)
+		goto bad_max_io_len;
+
 	c->cache = cache;
 	c->ti = ti;
 	c->metadata_dev = metadata_dev;
@@ -1797,22 +1818,33 @@ static void cache_postsuspend(struct dm_target *ti)
 {
 	int r;
 	unsigned sb_flags;
+	const char *policy_name;
 	struct cache_c *c = ti->private;
 	struct cache *cache = c->cache;
 
-	if (get_cache_mode(cache) == CM_WRITE) {
-		r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
-		if (r) {
-			DMERR("could not read superblock flags during suspend");
-			return;
-		}
-
-		sb_flags &= ~CACHE_DIRTY;
-		r = commit_or_fallback(cache, &sb_flags);
-		if (r)
-			DMERR("could not clear dirty flag in metadata superblock");
+	r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
+	if (r) {
+		DMERR("could not read superblock flags during suspend");
+		goto finish_suspend;
 	}
 
+	policy_name = dm_cache_policy_get_name(cache->policy);
+	r = dm_cache_metadata_write_policy_name(cache->cmd, policy_name);
+	if (r) {
+		DMERR("could not write cache's policy name to metadata");
+		goto finish_suspend;
+	}
+
+	/* TODO: write the cache policy's hints to disk here */
+
+	sb_flags &= ~CACHE_DIRTY;
+	r = commit_or_fallback(cache, &sb_flags);
+	if (r) {
+		DMERR("could not clear dirty flag in metadata superblock");
+		goto finish_suspend;
+	}
+
+finish_suspend:
 	start_quiescing(cache);
 	wait_for_migrations(cache);
 	stop_worker(cache);
@@ -1852,14 +1884,25 @@ static void cache_resume(struct dm_target *ti)
 		return;
 	}
 	if (sb_flags & CACHE_DIRTY)
-		/* FIXME: perform cache policy recovery */
+		/* TODO: perform cache policy recovery */
 		DMERR("cache metadata was not written cleanly during previous shutdown");
 
-	if (get_cache_mode(cache) == CM_WRITE) {
-		sb_flags &= CACHE_DIRTY;
-		r = commit_or_fallback(cache, &sb_flags);
-		if (r)
-			DMERR("could not set dirty flag in metadata superblock");
+	sb_flags &= CACHE_DIRTY;
+	r = commit_or_fallback(cache, &sb_flags);
+	if (r)
+		DMERR("could not set dirty flag in metadata superblock");
+
+	if (cache->inactive_policy) {
+		/* switch cache policy */
+		if (cache->policy) {
+			dm_cache_policy_destroy(cache->policy);
+			/* TODO: cleanup old policy's on-disk metadata */
+		}
+		cache->policy = cache->inactive_policy;
+		cache->inactive_policy = NULL;
+		if (dm_cache_load_mappings(cache->cmd, load_mapping, cache))
+			/* FIXME: likely need to set some internal invalid flag or? */
+			DMERR("Couldn't load cache mappings");
 	}
 }
 
