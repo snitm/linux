@@ -32,6 +32,8 @@
 #define CACHE_MAX_CONCURRENT_LOCKS 5
 #define SPACE_MAP_ROOT_SIZE 128
 
+#define POLICY_NAME_SIZE 16
+
 /*
  * Each mapping from cache block -> origin block carries a set of flags.
  */
@@ -56,6 +58,8 @@ struct cache_disk_superblock {
 	__u8 uuid[16];
 	__le64 magic;
 	__le32 version;
+
+	__u8 policy_name[16];
 
 	__u8 metadata_space_map_root[SPACE_MAP_ROOT_SIZE];
 	__le64 mapping_root;
@@ -243,6 +247,7 @@ static int __write_initial_superblock(struct dm_cache_metadata *cmd)
 	memset(disk_super->uuid, 0, sizeof(disk_super->uuid));
 	disk_super->magic = cpu_to_le64(CACHE_SUPERBLOCK_MAGIC);
 	disk_super->version = cpu_to_le32(CACHE_VERSION);
+	memset(disk_super->policy_name, 0, POLICY_NAME_SIZE);
 
 	r = dm_sm_copy_root(cmd->metadata_sm, &disk_super->metadata_space_map_root,
 			    metadata_len);
@@ -742,6 +747,74 @@ int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd)
 
 	return r;
 }
+
+static void set_policy_name(struct cache_disk_superblock *disk_super,
+			    const char *policy_name)
+{
+	memcpy(disk_super->policy_name, policy_name, POLICY_NAME_SIZE);
+}
+
+static const char *get_policy_name(struct cache_disk_superblock *disk_super)
+{
+	int i;
+	bool policy_name_all_zeroes = true;
+
+	for (i = 0; i < POLICY_NAME_SIZE; i++) {
+		if (disk_super->policy_name[i] != 0) {
+			policy_name_all_zeroes = false;
+			break;
+		}
+	}
+
+	return policy_name_all_zeroes ? NULL: disk_super->policy_name;
+}
+
+int dm_cache_metadata_write_policy_name(struct dm_cache_metadata *cmd,
+					const char *policy_name)
+{
+	struct cache_disk_superblock *disk_super;
+	struct dm_block *sblock;
+	int r;
+
+	down_write(&cmd->root_lock);
+	r = superblock_read_lock(cmd, &sblock);
+	if (r) {
+		up_write(&cmd->root_lock);
+		return r;
+	}
+
+	disk_super = dm_block_data(sblock);
+	set_policy_name(disk_super, policy_name);
+
+	dm_bm_unlock(sblock);
+	up_write(&cmd->root_lock);
+
+	return 0;
+}
+
+const char *dm_cache_metadata_read_policy_name(struct dm_cache_metadata *cmd)
+{
+	const char *policy_name;
+	struct cache_disk_superblock *disk_super;
+	struct dm_block *sblock;
+	int r;
+
+	down_read(&cmd->root_lock);
+	r = superblock_read_lock(cmd, &sblock);
+	if (r) {
+		up_read(&cmd->root_lock);
+		return ERR_PTR(r);
+	}
+
+	disk_super = dm_block_data(sblock);
+	policy_name = get_policy_name(disk_super);
+
+	dm_bm_unlock(sblock);
+	up_read(&cmd->root_lock);
+
+	return policy_name;
+}
+
 
 int dm_cache_read_superblock_flags(struct dm_cache_metadata *cmd, unsigned *flags)
 {

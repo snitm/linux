@@ -87,6 +87,10 @@ void dm_cache_metadata_read_only(struct dm_cache_metadata *cmd);
 
 void dm_cache_dump(struct dm_cache_metadata *cmd);
 
+int dm_cache_metadata_write_policy_name(struct dm_cache_metadata *cmd,
+					const char *policy_name);
+const char *dm_cache_metadata_read_policy_name(struct dm_cache_metadata *cmd);
+
 /*----------------------------------------------------------------*/
 
 #endif
