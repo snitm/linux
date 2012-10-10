@@ -1257,6 +1257,9 @@ static int sync_cache_metadata(struct cache *cache)
 	unsigned sb_flags;
 	const char *policy_name;
 
+	if (!cache->policy)
+		return 0; /* table was loaded but device never resumed */
+
 	policy_name = dm_cache_policy_get_name(cache->policy);
 	r = dm_cache_metadata_write_policy_name(cache->cmd, policy_name);
 	if (r) {
@@ -1302,7 +1305,10 @@ static void __cache_destroy(struct cache *cache)
 	mempool_destroy(cache->migration_pool);
 	mempool_destroy(cache->endio_hook_pool);
 	dm_deferred_set_destroy(cache->all_io_ds);
-	dm_cache_policy_destroy(cache->policy);
+	if (cache->policy)
+		dm_cache_policy_destroy(cache->policy);
+	if (cache->inactive_policy)
+		dm_cache_policy_destroy(cache->inactive_policy);
 	kfree(cache);
 }
 
@@ -1547,6 +1553,43 @@ static int create_inactive_cache_policy(struct cache *cache,
 	if (!cache->inactive_policy) {
 		*error = "Error creating cache's new policy";
 		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static int set_cache_policy(struct cache *cache)
+{
+	int r;
+	const char *old_policy_name, *new_policy_name;
+
+	/* is the cache policy being switched? */
+	old_policy_name = dm_cache_metadata_read_policy_name(cache->cmd);
+	if (IS_ERR(old_policy_name)) {
+		DMERR("%s: Error reading cache's policy name from metadata",
+		      __func__);
+		return PTR_ERR(old_policy_name);
+	}
+
+	new_policy_name = dm_cache_policy_get_name(cache->inactive_policy);
+	if (old_policy_name && new_policy_name &&
+	    strcasecmp(old_policy_name, new_policy_name)) {
+		DMINFO("switching cache policy from %s to %s",
+		       old_policy_name, new_policy_name);
+
+		if (cache->policy)
+			dm_cache_policy_destroy(cache->policy);
+
+		reset_cache_statistics(cache);
+		/* TODO: cleanup old policy's on-disk metadata */
+	}
+
+	cache->policy = cache->inactive_policy;
+	cache->inactive_policy = NULL;
+	r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
+	if (r) {
+		DMERR("could not load cache mappings");
+		return r;
 	}
 
 	return 0;
@@ -1911,37 +1954,6 @@ static void cache_postsuspend(struct dm_target *ti)
 	stop_worker(cache);
 	requeue_deferred_io(cache);
 	stop_quiescing(cache);
-}
-
-static int set_cache_policy(struct cache *cache)
-{
-	int r;
-	const char *old_policy_name, *new_policy_name;
-
-	/* is the cache policy being switched? */
-	old_policy_name = dm_cache_metadata_read_policy_name(cache->cmd);
-	new_policy_name = dm_cache_policy_get_name(cache->inactive_policy);
-	if (old_policy_name && new_policy_name &&
-	    strcasecmp(old_policy_name, new_policy_name)) {
-		DMINFO("switching cache policy from %s to %s",
-		       old_policy_name, new_policy_name);
-
-		if (cache->policy)
-			dm_cache_policy_destroy(cache->policy);
-
-		reset_cache_statistics(cache);
-		/* TODO: cleanup old policy's on-disk metadata */
-	}
-
-	cache->policy = cache->inactive_policy;
-	cache->inactive_policy = NULL;
-	r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
-	if (r) {
-		DMERR("could not load cache mappings");
-		return r;
-	}
-
-	return 0;
 }
 
 static int cache_preresume(struct dm_target *ti)
