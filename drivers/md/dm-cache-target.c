@@ -1311,14 +1311,14 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 		*error = "Couldn't allocate dirty_bitset";
 		goto bad_alloc_dirty_bitset;
 	}
-	set_bitset(c->dirty_bitset, c->cache_size)
+	set_bitset(cache->dirty_bitset, cache->cache_size);
 
 	cache->discard_bitset = alloc_bitset(cache->origin_blocks);
 	if (!cache->discard_bitset) {
 		*error = "Couldn't allocate discard bitset";
 		goto bad_alloc_discard_bitset;
 	}
-	clear_bitset(c->discard_bitset, c->origin_blocks);
+	clear_bitset(cache->discard_bitset, cache->origin_blocks);
 
 	cache->copier = dm_kcopyd_client_create();
 	if (IS_ERR(cache->copier)) {
