@@ -1309,6 +1309,19 @@ static void __cache_destroy(struct cache *cache)
 static struct kmem_cache *_migration_cache;
 static struct kmem_cache *_endio_hook_cache;
 
+static void reset_cache_statistics(struct cache *cache)
+{
+	atomic_set(&cache->read_hit, 0);
+	atomic_set(&cache->read_miss, 0);
+	atomic_set(&cache->write_hit, 0);
+	atomic_set(&cache->write_miss, 0);
+	atomic_set(&cache->demotion, 0);
+	atomic_set(&cache->promotion, 0);
+	atomic_set(&cache->copies_avoided, 0);
+	atomic_set(&cache->cache_cell_clash, 0);
+	atomic_set(&cache->commit_count, 0);
+}
+
 static struct cache *cache_create(struct mapped_device *cache_md,
 				  struct block_device *metadata_dev,
 				  sector_t block_size, sector_t origin_sectors,
@@ -1421,15 +1434,7 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 		goto bad_migration_pool;
 	}
 
-	atomic_set(&cache->read_hit, 0);
-	atomic_set(&cache->read_miss, 0);
-	atomic_set(&cache->write_hit, 0);
-	atomic_set(&cache->write_miss, 0);
-	atomic_set(&cache->demotion, 0);
-	atomic_set(&cache->promotion, 0);
-	atomic_set(&cache->copies_avoided, 0);
-	atomic_set(&cache->cache_cell_clash, 0);
-	atomic_set(&cache->commit_count, 0);
+	reset_cache_statistics(cache);
 
 	cache->ref_count = 1;
 	cache->quiescing = false;
@@ -1513,8 +1518,8 @@ static struct cache *__cache_find(struct mapped_device *cache_md,
 	return cache;
 }
 
-static int create_inactive_cache_policy(struct cache *cache, const char *policy_name,
-					char **error)
+static int create_inactive_cache_policy(struct cache *cache,
+					const char *policy_name, char **error)
 {
 	const char *old_policy_name;
 
@@ -1530,13 +1535,15 @@ static int create_inactive_cache_policy(struct cache *cache, const char *policy_
 		cache->inactive_policy = NULL;
 	}
 
-	if (cache->policy && old_policy_name && !strcasecmp(old_policy_name, policy_name))
+	if (cache->policy && old_policy_name &&
+	    !strcasecmp(old_policy_name, policy_name))
 		/* policy isn't being switched, keep existing active policy */
 		return 0;
 
-	cache->inactive_policy = dm_cache_policy_create(policy_name, cache->cache_size,
-							cache->origin_sectors,
-							cache->sectors_per_block);
+	cache->inactive_policy =
+		dm_cache_policy_create(policy_name, cache->cache_size,
+				       cache->origin_sectors,
+				       cache->sectors_per_block);
 	if (!cache->inactive_policy) {
 		*error = "Error creating cache's new policy";
 		return -ENOMEM;
@@ -1906,10 +1913,42 @@ static void cache_postsuspend(struct dm_target *ti)
 	stop_quiescing(cache);
 }
 
+static int set_cache_policy(struct cache *cache)
+{
+	int r;
+	const char *old_policy_name, *new_policy_name;
+
+	/* is the cache policy being switched? */
+	old_policy_name = dm_cache_metadata_read_policy_name(cache->cmd);
+	new_policy_name = dm_cache_policy_get_name(cache->inactive_policy);
+	if (old_policy_name && new_policy_name &&
+	    strcasecmp(old_policy_name, new_policy_name)) {
+		DMINFO("switching cache policy from %s to %s",
+		       old_policy_name, new_policy_name);
+
+		if (cache->policy)
+			dm_cache_policy_destroy(cache->policy);
+
+		reset_cache_statistics(cache);
+		/* TODO: cleanup old policy's on-disk metadata */
+	}
+
+	cache->policy = cache->inactive_policy;
+	cache->inactive_policy = NULL;
+	r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
+	if (r) {
+		DMERR("could not load cache mappings");
+		return r;
+	}
+
+	return 0;
+}
+
 static int cache_preresume(struct dm_target *ti)
 {
 	int r;
 	unsigned sb_flags;
+
 	struct cache_c *c = ti->private;
 	struct cache *cache = c->cache;
 
@@ -1935,18 +1974,9 @@ static int cache_preresume(struct dm_target *ti)
 		DMERR("could not set dirty flag in metadata superblock");
 
 	if (cache->inactive_policy) {
-		/* switch cache policy */
-		if (cache->policy) {
-			dm_cache_policy_destroy(cache->policy);
-			/* TODO: cleanup old policy's on-disk metadata */
-		}
-		cache->policy = cache->inactive_policy;
-		cache->inactive_policy = NULL;
-		r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
-		if (r) {
-			DMERR("could not load cache mappings");
+		r = set_cache_policy(cache);
+		if (r)
 			return r;
-		}
 	}
 
 	return 0;
