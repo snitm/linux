@@ -1222,10 +1222,40 @@ static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock)
 	return policy_load_mapping(cache->policy, oblock, cblock);
 }
 
+static int sync_cache_metadata(struct cache *cache)
+{
+	int r;
+	unsigned sb_flags;
+	const char *policy_name;
+
+	policy_name = dm_cache_policy_get_name(cache->policy);
+	r = dm_cache_metadata_write_policy_name(cache->cmd, policy_name);
+	if (r) {
+		DMERR("could not write cache's policy name to metadata");
+		return r;
+	}
+
+	/* TODO: write the cache policy's hints to disk here */
+
+	r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
+	if (r) {
+		DMERR("could not read superblock flags during suspend");
+		return r;
+	}
+
+	sb_flags &= ~CACHE_DIRTY;
+	r = commit_or_fallback(cache, &sb_flags);
+	if (r)
+		DMERR("could not clear dirty flag in metadata superblock");
+
+	return 0;
+}
+
 static void __cache_destroy(struct cache *cache)
 {
 	__cache_table_remove(cache);
 
+	(void) sync_cache_metadata(cache);
 	if (dm_cache_metadata_close(cache->cmd) < 0)
 		DMWARN("%s: dm_cache_metadata_close() failed.", __func__);
 
@@ -1831,33 +1861,11 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 
 static void cache_postsuspend(struct dm_target *ti)
 {
-	int r;
-	unsigned sb_flags;
-	const char *policy_name;
 	struct cache_c *c = ti->private;
 	struct cache *cache = c->cache;
 
-	policy_name = dm_cache_policy_get_name(cache->policy);
-	r = dm_cache_metadata_write_policy_name(cache->cmd, policy_name);
-	if (r) {
-		DMERR("could not write cache's policy name to metadata");
-		goto finish_suspend;
-	}
+	(void) sync_cache_metadata(cache);
 
-	/* TODO: write the cache policy's hints to disk here */
-
-	r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
-	if (r) {
-		DMERR("could not read superblock flags during suspend");
-		goto finish_suspend;
-	}
-
-	sb_flags &= ~CACHE_DIRTY;
-	r = commit_or_fallback(cache, &sb_flags);
-	if (r)
-		DMERR("could not clear dirty flag in metadata superblock");
-
-finish_suspend:
 	start_quiescing(cache);
 	wait_for_migrations(cache);
 	stop_worker(cache);
