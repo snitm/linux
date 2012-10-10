@@ -1255,17 +1255,9 @@ static int sync_cache_metadata(struct cache *cache)
 {
 	int r;
 	unsigned sb_flags;
-	const char *policy_name;
 
 	if (!cache->policy)
 		return 0; /* table was loaded but device never resumed */
-
-	policy_name = dm_cache_policy_get_name(cache->policy);
-	r = dm_cache_metadata_write_policy_name(cache->cmd, policy_name);
-	if (r) {
-		DMERR("could not write cache's policy name to metadata");
-		return r;
-	}
 
 	/* TODO: write the cache policy's hints to disk here */
 
@@ -1570,7 +1562,6 @@ static int set_cache_policy(struct cache *cache)
 		      __func__);
 		return PTR_ERR(old_policy_name);
 	}
-
 	new_policy_name = dm_cache_policy_get_name(cache->inactive_policy);
 	if (old_policy_name && new_policy_name &&
 	    strcasecmp(old_policy_name, new_policy_name)) {
@@ -1584,8 +1575,14 @@ static int set_cache_policy(struct cache *cache)
 		/* TODO: cleanup old policy's on-disk metadata */
 	}
 
+	r = dm_cache_metadata_write_policy_name(cache->cmd, new_policy_name);
+	if (r) {
+		DMERR("could not write cache's policy name to metadata");
+		return r;
+	}
 	cache->policy = cache->inactive_policy;
 	cache->inactive_policy = NULL;
+
 	r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
 	if (r) {
 		DMERR("could not load cache mappings");
