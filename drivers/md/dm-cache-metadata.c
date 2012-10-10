@@ -546,21 +546,17 @@ struct dm_cache_metadata *dm_cache_metadata_open(struct block_device *bdev,
 int dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 {
 	int r;
-	unsigned sb_flags;
 
-	if (!cmd->read_only && !cmd->fail_io) {
-		dm_cache_read_superblock_flags(cmd, &sb_flags);
-		sb_flags &= ~CACHE_DIRTY;
-		r = __commit_transaction(cmd, &sb_flags);
+	if (!cmd->fail_io) {
+		r = __commit_transaction(cmd, NULL);
 		if (r < 0)
 			DMWARN("%s: __commit_transaction() failed, error = %d",
 			       __func__, r);
 	}
 
-	if (!cmd->fail_io) {
-		dm_cache_dump(cmd);
+	dm_cache_dump(cmd);
+	if (!cmd->fail_io)
 		__destroy_persistent_data_objects(cmd);
-	}
 
 	kfree(cmd);
 	return 0;
