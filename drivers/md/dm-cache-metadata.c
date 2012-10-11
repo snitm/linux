@@ -554,7 +554,7 @@ int dm_cache_metadata_close(struct dm_cache_metadata *cmd)
 			       __func__, r);
 	}
 
-	dm_cache_dump(cmd);
+	//dm_cache_dump(cmd);
 	if (!cmd->fail_io)
 		__destroy_persistent_data_objects(cmd);
 

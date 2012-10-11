@@ -836,7 +836,7 @@ static int mq_load_mapping(struct dm_cache_policy *p, dm_block_t oblock, dm_bloc
 	if (!e)
 		return -ENOMEM;
 
-	pr_alert("loading mapping o(%u) -> c(%u)\n", (unsigned) oblock, (unsigned) cblock);
+	//pr_alert("loading mapping o(%u) -> c(%u)\n", (unsigned) oblock, (unsigned) cblock);
 	e->cblock = cblock;
 	e->oblock = oblock;
 	e->in_cache = true;
