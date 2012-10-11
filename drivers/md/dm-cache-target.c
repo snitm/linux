@@ -211,6 +211,8 @@ struct cache_c {
 
 	struct cache_features requested_cf; /* Features requested during table load */
 	struct cache_features adjusted_cf;  /* Features used after adjusting for constituent devices */
+
+	char policy_name[POLICY_NAME_SIZE];
 };
 
 /*----------------------------------------------------------------*/
@@ -1791,6 +1793,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	c->cache = cache;
 	c->ti = ti;
+	memcpy(c->policy_name, policy_name, POLICY_NAME_SIZE);
 	c->metadata_dev = metadata_dev;
 	c->origin_dev = origin_dev;
 	c->cache_dev = cache_dev;
@@ -2073,7 +2076,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		format_dev_t(buf, c->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
 		DMEMIT("%llu ", (unsigned long long) cache->sectors_per_block);
-		DMEMIT("%s ", dm_cache_policy_get_name(cache->policy));
+		DMEMIT("%s ", c->policy_name);
 		emit_flags(&c->requested_cf, result, sz, maxlen);
 		break;
 	}

@@ -32,8 +32,6 @@
 #define CACHE_MAX_CONCURRENT_LOCKS 5
 #define SPACE_MAP_ROOT_SIZE 128
 
-#define POLICY_NAME_SIZE 16
-
 /*
  * Each mapping from cache block -> origin block carries a set of flags.
  */

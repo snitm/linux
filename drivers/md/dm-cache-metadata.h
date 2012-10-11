@@ -11,6 +11,7 @@
 
 /*----------------------------------------------------------------*/
 
+#define POLICY_NAME_SIZE 16
 #define CACHE_METADATA_BLOCK_SIZE 4096
 
 /* FIXME: remove this restriction */
