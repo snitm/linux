@@ -796,7 +796,7 @@ static void writeback_then_promote(struct cache_c *c,
 static void defer_bio(struct cache_c *c, struct bio *bio)
 {
 	unsigned long flags;
-	struct cache *cache = c->cache;	
+	struct cache *cache = c->cache;
 
 	spin_lock_irqsave(&cache->lock, flags);
 	bio_list_add(&cache->deferred_bios, bio);
@@ -851,7 +851,7 @@ static void process_bio(struct cache_c *c, struct bio *bio)
 	int r;
 	bool release_cell = true;
 	struct cache *cache = c->cache;
-	struct dm_cell_key key;	
+	struct dm_cell_key key;
 	dm_block_t block = get_bio_block(c, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
