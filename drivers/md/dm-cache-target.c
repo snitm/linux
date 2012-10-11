@@ -1816,7 +1816,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	return 0;
 
 bad_max_io_len:
-	__cache_dec(c->cache);
+	__cache_dec(cache);
 bad_free_c:
 	kfree(c);
 bad:
