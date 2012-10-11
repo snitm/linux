@@ -1946,10 +1946,9 @@ static void cache_postsuspend(struct dm_target *ti)
 	struct cache_c *c = ti->private;
 	struct cache *cache = c->cache;
 
-	(void) sync_cache_metadata(cache);
-
 	start_quiescing(cache);
 	wait_for_migrations(cache);
+	(void) sync_cache_metadata(cache);
 	stop_worker(cache);
 	requeue_deferred_io(cache);
 	stop_quiescing(cache);
