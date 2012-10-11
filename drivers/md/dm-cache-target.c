@@ -82,14 +82,14 @@ static void free_bitset(unsigned long *bits)
  * The cache runs in 3 modes.  Ordered in degraded order for comparisons.
  * FIXME: factor out to common code to share with dm-thin
  */
-enum cache_mode {
+enum cache_metadata_mode {
 	CM_WRITE,		/* metadata may be changed */
 	CM_READ_ONLY,		/* metadata may not be changed */
 	CM_FAIL,		/* all I/O fails */
 };
 
 struct cache_features {
-	enum cache_mode mode;
+	enum cache_metadata_mode metadata_mode;
 
 	bool discard_enabled:1;
 };
@@ -933,17 +933,16 @@ static void process_bio_fail(struct cache_c *c, struct bio *bio)
 
 /* FIXME: factor out to common code to share with dm-thin */
 
-static enum cache_mode get_cache_mode(struct cache *cache)
+static enum cache_metadata_mode get_cache_metadata_mode(struct cache *cache)
 {
-	return cache->cf.mode;
+	return cache->cf.metadata_mode;
 }
 
-/* FIXME: could use different name, so as not to be confused with wb and wt */
-static void set_cache_mode(struct cache *cache, enum cache_mode mode)
+static void set_cache_metadata_mode(struct cache *cache, enum cache_metadata_mode mode)
 {
 	int r;
 
-	cache->cf.mode = mode;
+	cache->cf.metadata_mode = mode;
 
 	switch (mode) {
 	case CM_FAIL:
@@ -961,7 +960,7 @@ static void set_cache_mode(struct cache *cache, enum cache_mode mode)
 		r = dm_cache_abort_metadata(cache->cmd);
 		if (r) {
 			DMERR("aborting transaction failed");
-			set_cache_mode(cache, CM_FAIL);
+			set_cache_metadata_mode(cache, CM_FAIL);
 		} else {
 			dm_cache_metadata_read_only(cache->cmd);
 			cache->process_bio = process_bio_read_only;
@@ -1006,12 +1005,12 @@ static int commit_or_fallback(struct cache *cache, unsigned *sb_flags)
 {
 	int r;
 
-	if (get_cache_mode(cache) != CM_WRITE)
+	if (get_cache_metadata_mode(cache) != CM_WRITE)
 		return -EINVAL;
 
 	r = commit(cache, sb_flags);
 	if (r)
-		set_cache_mode(cache, CM_READ_ONLY);
+		set_cache_metadata_mode(cache, CM_READ_ONLY);
 
 	return r;
 }
@@ -1215,8 +1214,8 @@ static int bind_control_target(struct cache *cache, struct dm_target *ti)
 	/*
 	 * We want to make sure that degraded caches are never upgraded.
 	 */
-	enum cache_mode old_mode = cache->cf.mode;
-	enum cache_mode new_mode = c->adjusted_cf.mode;
+	enum cache_metadata_mode old_mode = cache->cf.metadata_mode;
+	enum cache_metadata_mode new_mode = c->adjusted_cf.metadata_mode;
 
 	if (old_mode > new_mode)
 		new_mode = old_mode;
@@ -1224,7 +1223,7 @@ static int bind_control_target(struct cache *cache, struct dm_target *ti)
 	cache->ti = ti;
 	cache->cf = c->adjusted_cf;
 
-	set_cache_mode(cache, new_mode);
+	set_cache_metadata_mode(cache, new_mode);
 
 	return 0;
 }
@@ -1241,7 +1240,7 @@ static void unbind_control_target(struct cache *cache, struct dm_target *ti)
 /* Initialize cache features. */
 static void cache_features_init(struct cache_features *cf)
 {
-	cf->mode = CM_WRITE;
+	cf->metadata_mode = CM_WRITE;
 	cf->discard_enabled = true;
 }
 
@@ -1671,7 +1670,7 @@ static int parse_cache_features(struct dm_arg_set *as, struct cache_features *cf
 			cf->discard_enabled = false;
 
 		else if (!strcasecmp(arg_name, "read_only"))
-			cf->mode = CM_READ_ONLY;
+			cf->metadata_mode = CM_READ_ONLY;
 
 		else {
 			ti->error = "Unrecognised cache feature requested";
@@ -1777,7 +1776,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	cache = __cache_find(dm_table_get_md(ti->table), metadata_dev->bdev,
 			     block_size, origin_sectors, cache_sectors, policy_name,
-			     cf.mode == CM_READ_ONLY, &ti->error, &cache_created);
+			     cf.metadata_mode == CM_READ_ONLY, &ti->error, &cache_created);
 	if (IS_ERR(cache)) {
 		r = PTR_ERR(cache);
 		goto bad_free_c;
@@ -2003,13 +2002,13 @@ static void cache_resume(struct dm_target *ti)
 static void emit_flags(struct cache_features *cf, char *result,
 		       unsigned sz, unsigned maxlen)
 {
-	unsigned count = !cf->discard_enabled + (cf->mode == CM_READ_ONLY);
+	unsigned count = !cf->discard_enabled + (cf->metadata_mode == CM_READ_ONLY);
 	DMEMIT("%u ", count);
 
 	if (!cf->discard_enabled)
 		DMEMIT("ignore_discard ");
 
-	if (cf->mode == CM_READ_ONLY)
+	if (cf->metadata_mode == CM_READ_ONLY)
 		DMEMIT("read_only ");
 }
 
@@ -2027,7 +2026,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 	switch (type) {
 	case STATUSTYPE_INFO:
-		if (get_cache_mode(cache) == CM_FAIL) {
+		if (get_cache_metadata_mode(cache) == CM_FAIL) {
 			DMEMIT("Fail");
 			break;
 		}
@@ -2059,7 +2058,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long long) residency,
 		       (unsigned) atomic_read(&cache->cache_cell_clash));
 
-		if (cache->cf.mode == CM_READ_ONLY)
+		if (cache->cf.metadata_mode == CM_READ_ONLY)
 			DMEMIT("ro ");
 		else
 			DMEMIT("rw ");
