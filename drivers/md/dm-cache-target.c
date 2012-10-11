@@ -1246,30 +1246,57 @@ static void cache_features_init(struct cache_features *cf)
 	cf->discard_enabled = true;
 }
 
-static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock)
+static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock, bool dirty)
 {
 	struct cache *cache = context;
+
+	dirty ? set_bit(cblock, cache->dirty_bitset) :
+		clear_bit(cblock, cache->dirty_bitset);
+
 	return policy_load_mapping(cache->policy, oblock, cblock);
+}
+
+static int write_dirty_bitset(struct cache *cache)
+{
+	unsigned i, r;
+
+	for (i = 0; i < cache->cache_size; i++) {
+		r = dm_cache_set_dirty(cache->cmd, i,
+				       test_bit(i, cache->dirty_bitset));
+		if (r)
+			return r;
+	}
+
+	return 0;
 }
 
 static int sync_cache_metadata(struct cache *cache)
 {
 	int r;
-	unsigned sb_flags;
+	unsigned sb_flags, *sb_flags_p = NULL;
 
 	if (!cache->policy)
 		return 0; /* table was loaded but device never resumed */
 
-	/* TODO: write the cache policy's hints to disk here */
+	/* write the cache policy's hints to disk */
+	r = write_dirty_bitset(cache);
 
-	r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
-	if (r) {
-		DMERR("could not read superblock flags during suspend");
-		return r;
+	/*
+	 * If writing the bitset failed, we still commit, but don't set the
+	 * clean shutdown flag.  This will effectively force every dirty
+	 * bit to be set on reload.
+	 */
+	if (!r) {
+		r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
+		if (r)
+			DMERR("could not read superblock flags during suspend");
+		else {
+			sb_flags &= ~CACHE_DIRTY;
+			sb_flags_p = &sb_flags;
+		}
 	}
 
-	sb_flags &= ~CACHE_DIRTY;
-	r = commit_or_fallback(cache, &sb_flags);
+	r = commit_or_fallback(cache, sb_flags_p);
 	if (r)
 		DMERR("could not clear dirty flag in metadata superblock");
 
@@ -1948,10 +1975,11 @@ static void cache_postsuspend(struct dm_target *ti)
 
 	start_quiescing(cache);
 	wait_for_migrations(cache);
-	(void) sync_cache_metadata(cache);
 	stop_worker(cache);
 	requeue_deferred_io(cache);
 	stop_quiescing(cache);
+
+	(void) sync_cache_metadata(cache);
 }
 
 static int cache_preresume(struct dm_target *ti)
