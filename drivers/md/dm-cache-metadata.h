@@ -23,12 +23,6 @@
  */
 #define CACHE_METADATA_MAX_SECTORS (255 * (1 << 14) * (CACHE_METADATA_BLOCK_SIZE / (1 << SECTOR_SHIFT)))
 
-enum superblock_flag_bits {
-	__CACHE_DIRTY,	    /* cache policy data is not to be trusted on resume */
-};
-
-#define CACHE_DIRTY		(1 << __CACHE_DIRTY)
-
 /*
  * Compat feature flags.  Any incompat flags beyond the ones
  * specified below will prevent use of the thin metadata.
@@ -64,13 +58,23 @@ int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
 			   load_mapping_fn fn,
 			   void *context);
 
-int dm_cache_read_superblock_flags(struct dm_cache_metadata *cmd, unsigned *flags);
-
 int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_block_t cblock, bool dirty);
 
-int dm_cache_commit_with_flags(struct dm_cache_metadata *cmd, unsigned *flags);
+struct dm_cache_statistics {
+	uint32_t read_hits;
+	uint32_t read_misses;
+	uint32_t write_hits;
+	uint32_t write_misses;
+};
 
-int dm_cache_commit(struct dm_cache_metadata *cmd);
+void dm_cache_get_stats(struct dm_cache_metadata *cmd,
+			struct dm_cache_statistics *stats);
+void dm_cache_set_stats(struct dm_cache_metadata *cmd,
+			struct dm_cache_statistics *stats);
+
+int dm_cache_commit(struct dm_cache_metadata *cmd, bool clean_shutdown);
+
+void dm_cache_dump(struct dm_cache_metadata *cmd);
 
 int dm_cache_abort_metadata(struct dm_cache_metadata *cmd);
 
@@ -87,8 +91,6 @@ int dm_cache_get_metadata_dev_size(struct dm_cache_metadata *cmd,
  * that nothing is changing.
  */
 void dm_cache_metadata_read_only(struct dm_cache_metadata *cmd);
-
-void dm_cache_dump(struct dm_cache_metadata *cmd);
 
 int dm_cache_metadata_write_policy_name(struct dm_cache_metadata *cmd,
 					const char *policy_name);

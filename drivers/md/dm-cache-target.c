@@ -351,6 +351,51 @@ static bool is_discarded(struct cache *cache, dm_block_t b)
 	return r;
 }
 
+/*----------------------------------------------------------------*/
+
+static void save_stats(struct cache *cache)
+{
+	struct dm_cache_statistics stats;
+
+	stats.read_hits = atomic_read(&cache->read_hit);
+	stats.read_misses = atomic_read(&cache->read_miss);
+	stats.write_hits = atomic_read(&cache->write_hit);
+	stats.write_misses = atomic_read(&cache->write_miss);
+
+	dm_cache_set_stats(cache->cmd, &stats);
+}
+
+static void reset_incore_stats(struct cache *cache)
+{
+	atomic_set(&cache->demotion, 0);
+	atomic_set(&cache->promotion, 0);
+	atomic_set(&cache->copies_avoided, 0);
+	atomic_set(&cache->cache_cell_clash, 0);
+	atomic_set(&cache->commit_count, 0);
+}
+
+static void reset_stats(struct cache *cache)
+{
+	atomic_set(&cache->read_hit, 0);
+	atomic_set(&cache->read_miss, 0);
+	atomic_set(&cache->write_hit, 0);
+	atomic_set(&cache->write_miss, 0);
+	save_stats(cache);
+
+	reset_incore_stats(cache);
+}
+
+static void load_stats(struct cache *cache)
+{
+	struct dm_cache_statistics stats;
+
+	dm_cache_get_stats(cache->cmd, &stats);
+	atomic_set(&cache->read_hit, stats.read_hits);
+	atomic_set(&cache->read_miss, stats.read_misses);
+	atomic_set(&cache->write_hit, stats.write_hits);
+	atomic_set(&cache->write_miss, stats.write_misses);
+}
+
 /*----------------------------------------------------------------
  * Remapping
  *--------------------------------------------------------------*/
@@ -985,14 +1030,11 @@ static void set_cache_metadata_mode(struct cache *cache, enum cache_metadata_mod
 	}
 }
 
-static int commit(struct cache *cache, unsigned *sb_flags)
+static int commit(struct cache *cache, bool clean_shutdown)
 {
 	int r;
 
-	if (!sb_flags)
-		r = dm_cache_commit(cache->cmd);
-	else
-		r = dm_cache_commit_with_flags(cache->cmd, sb_flags);
+	r = dm_cache_commit(cache->cmd, clean_shutdown);
 	if (r)
 		DMERR("commit failed, error = %d", r);
 
@@ -1003,14 +1045,14 @@ static int commit(struct cache *cache, unsigned *sb_flags)
  * A non-zero return indicates read_only or fail_io mode.
  * Many callers don't care about the return value.
  */
-static int commit_or_fallback(struct cache *cache, unsigned *sb_flags)
+static int commit_or_fallback(struct cache *cache, bool clean_shutdown)
 {
 	int r;
 
 	if (get_cache_metadata_mode(cache) != CM_WRITE)
 		return -EINVAL;
 
-	r = commit(cache, sb_flags);
+	r = commit(cache, clean_shutdown);
 	if (r)
 		set_cache_metadata_mode(cache, CM_READ_ONLY);
 
@@ -1032,7 +1074,7 @@ static int commit_if_needed(struct cache *cache)
 	atomic_inc(&cache->commit_count);
 	cache->last_commit_jiffies = jiffies;
 	cache->commit_requested = false;
-	return commit_or_fallback(cache, NULL);
+	return commit_or_fallback(cache, false);
 }
 
 /*----------------------------------------------------------------*/
@@ -1273,30 +1315,20 @@ static int write_dirty_bitset(struct cache *cache)
 static int sync_cache_metadata(struct cache *cache)
 {
 	int r;
-	unsigned sb_flags, *sb_flags_p = NULL;
 
 	if (!cache->policy)
 		return 0; /* table was loaded but device never resumed */
 
 	/* write the cache policy's hints to disk */
 	r = write_dirty_bitset(cache);
+	save_stats(cache);
 
 	/*
 	 * If writing the bitset failed, we still commit, but don't set the
 	 * clean shutdown flag.  This will effectively force every dirty
 	 * bit to be set on reload.
 	 */
-	if (!r) {
-		r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
-		if (r)
-			DMERR("could not read superblock flags during suspend");
-		else {
-			sb_flags &= ~CACHE_DIRTY;
-			sb_flags_p = &sb_flags;
-		}
-	}
-
-	r = commit_or_fallback(cache, sb_flags_p);
+	r = commit_or_fallback(cache, !r);
 	if (r)
 		DMERR("could not clear dirty flag in metadata superblock");
 
@@ -1334,19 +1366,6 @@ static void __cache_destroy(struct cache *cache)
 
 static struct kmem_cache *_migration_cache;
 static struct kmem_cache *_endio_hook_cache;
-
-static void reset_cache_statistics(struct cache *cache)
-{
-	atomic_set(&cache->read_hit, 0);
-	atomic_set(&cache->read_miss, 0);
-	atomic_set(&cache->write_hit, 0);
-	atomic_set(&cache->write_miss, 0);
-	atomic_set(&cache->demotion, 0);
-	atomic_set(&cache->promotion, 0);
-	atomic_set(&cache->copies_avoided, 0);
-	atomic_set(&cache->cache_cell_clash, 0);
-	atomic_set(&cache->commit_count, 0);
-}
 
 static struct cache *cache_create(struct mapped_device *cache_md,
 				  struct block_device *metadata_dev,
@@ -1460,7 +1479,8 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 		goto bad_migration_pool;
 	}
 
-	reset_cache_statistics(cache);
+	load_stats(cache);
+	reset_incore_stats(cache);
 
 	cache->ref_count = 1;
 	cache->quiescing = false;
@@ -1599,7 +1619,7 @@ static int set_cache_policy(struct cache *cache)
 		if (cache->policy)
 			dm_cache_policy_destroy(cache->policy);
 
-		reset_cache_statistics(cache);
+		reset_stats(cache);
 		/* TODO: cleanup old policy's on-disk metadata */
 	}
 
@@ -1985,7 +2005,6 @@ static void cache_postsuspend(struct dm_target *ti)
 static int cache_preresume(struct dm_target *ti)
 {
 	int r;
-	unsigned sb_flags;
 
 	struct cache_c *c = ti->private;
 	struct cache *cache = c->cache;
@@ -1996,20 +2015,6 @@ static int cache_preresume(struct dm_target *ti)
 	r = bind_control_target(cache, ti);
 	if (r)
 		return r;
-
-	r = dm_cache_read_superblock_flags(cache->cmd, &sb_flags);
-	if (r) {
-		DMERR("could not read superblock flags during resume");
-		return r;
-	}
-	if (sb_flags & CACHE_DIRTY)
-		/* TODO: perform cache policy recovery */
-		DMERR("cache metadata was not written cleanly during previous shutdown");
-
-	sb_flags &= CACHE_DIRTY;
-	r = commit_or_fallback(cache, &sb_flags);
-	if (r)
-		DMERR("could not set dirty flag in metadata superblock");
 
 	if (cache->inactive_policy) {
 		r = set_cache_policy(cache);
@@ -2063,7 +2068,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 
 		/* Commit to ensure statistics aren't out-of-date */
 		if (!(status_flags & DM_STATUS_NOFLUSH_FLAG) && !dm_suspended(ti))
-			(void) commit_or_fallback(cache, NULL);
+			(void) commit_or_fallback(cache, false);
 
 		r = dm_cache_get_free_metadata_block_count(cache->cmd,
 							   &nr_free_blocks_metadata);
