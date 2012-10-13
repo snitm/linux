@@ -103,8 +103,6 @@ struct cache {
 	struct list_head list;
 	struct dm_target *ti;	/* Only set if a cache target is bound */
 
-	struct mapped_device *cache_md;
-	struct block_device *md_dev;
 	struct dm_cache_metadata *cmd;
 
 	process_bio_fn process_bio;
@@ -140,8 +138,6 @@ struct cache {
 	struct list_head need_commit_migrations;
 	wait_queue_head_t migration_wait;
 	atomic_t nr_migrations;
-
-	unsigned ref_count;
 
 	struct cache_features cf;
 
@@ -214,68 +210,6 @@ struct cache_c {
 
 	char policy_name[POLICY_NAME_SIZE];
 };
-
-/*----------------------------------------------------------------*/
-
-/*
- * A global list of caches that uses a struct mapped_device as a key.
- * This list is a means to hand-over an existing cache object on table reload.
- * FIXME: factor out to common code and share with dm_thin_pool_table
- */
-static struct dm_cache_table {
-	struct mutex mutex;
-	struct list_head caches;
-} dm_cache_table;
-
-static void cache_table_init(void)
-{
-	mutex_init(&dm_cache_table.mutex);
-	INIT_LIST_HEAD(&dm_cache_table.caches);
-}
-
-static void __cache_table_insert(struct cache *cache)
-{
-	BUG_ON(!mutex_is_locked(&dm_cache_table.mutex));
-	list_add(&cache->list, &dm_cache_table.caches);
-}
-
-static void __cache_table_remove(struct cache *cache)
-{
-	BUG_ON(!mutex_is_locked(&dm_cache_table.mutex));
-	list_del(&cache->list);
-}
-
-static struct cache *__cache_table_lookup(struct mapped_device *md)
-{
-	struct cache *cache = NULL, *tmp;
-
-	BUG_ON(!mutex_is_locked(&dm_cache_table.mutex));
-
-	list_for_each_entry(tmp, &dm_cache_table.caches, list) {
-		if (tmp->cache_md == md) {
-			cache = tmp;
-			break;
-		}
-	}
-
-	return cache;
-}
-
-static struct cache *__cache_table_lookup_metadata_dev(struct block_device *md_dev)
-{
-	struct cache *cache = NULL, *tmp;
-
-	BUG_ON(!mutex_is_locked(&dm_cache_table.mutex));
-
-	list_for_each_entry(tmp, &dm_cache_table.caches, list) {
-		if (tmp->md_dev == md_dev) {
-			cache = tmp;
-			break;
-		}
-	}
-
-	return cache;
-}
 
 /*----------------------------------------------------------------*/
 
@@ -1337,8 +1271,6 @@ static int sync_cache_metadata(struct cache *cache)
 
 static void __cache_destroy(struct cache *cache)
 {
-	__cache_table_remove(cache);
-
 	(void) sync_cache_metadata(cache);
 	if (dm_cache_metadata_close(cache->cmd) < 0)
 		DMWARN("%s: dm_cache_metadata_close() failed.", __func__);
@@ -1367,11 +1299,10 @@ static void __cache_destroy(struct cache *cache)
 static struct kmem_cache *_migration_cache;
 static struct kmem_cache *_endio_hook_cache;
 
-static struct cache *cache_create(struct mapped_device *cache_md,
-				  struct block_device *metadata_dev,
+static struct cache *cache_create(struct block_device *metadata_dev,
 				  sector_t block_size, sector_t origin_sectors,
 				  sector_t cache_sectors, const char *policy_name,
-				  int read_only, char **error)
+				  bool read_only, char **error)
 {
 	int r;
 	void *err_p = ERR_PTR(-ENOMEM);
@@ -1482,13 +1413,9 @@ static struct cache *cache_create(struct mapped_device *cache_md,
 	load_stats(cache);
 	reset_incore_stats(cache);
 
-	cache->ref_count = 1;
 	cache->quiescing = false;
 	cache->commit_requested = false;
 	cache->last_commit_jiffies = jiffies;
-	cache->cache_md = cache_md;
-	cache->md_dev = metadata_dev;
-	__cache_table_insert(cache);
 
 	return cache;
 
@@ -1513,55 +1440,6 @@ bad_cache:
 		DMWARN("%s: dm_cache_metadata_close() failed.", __func__);
 
 	return err_p;
-}
-
-static void __cache_inc(struct cache *cache)
-{
-	BUG_ON(!mutex_is_locked(&dm_cache_table.mutex));
-	cache->ref_count++;
-}
-
-static void __cache_dec(struct cache *cache)
-{
-	BUG_ON(!mutex_is_locked(&dm_cache_table.mutex));
-	BUG_ON(!cache->ref_count);
-	if (!--cache->ref_count)
-		__cache_destroy(cache);
-}
-
-static struct cache *__cache_find(struct mapped_device *cache_md,
-				  struct block_device *metadata_dev,
-				  sector_t block_size, sector_t origin_sectors,
-				  sector_t cache_sectors, const char *policy_name,
-				  int read_only, char **error, int *created)
-{
-	struct cache *cache = __cache_table_lookup_metadata_dev(metadata_dev);
-
-	if (cache) {
-		if (cache->cache_md != cache_md) {
-			*error = "metadata device already in use by a cache";
-			return ERR_PTR(-EBUSY);
-		}
-		__cache_inc(cache);
-
-	} else {
-		cache = __cache_table_lookup(cache_md);
-		if (cache) {
-			if (cache->md_dev != metadata_dev) {
-				*error = "different cache cannot replace a cache";
-				return ERR_PTR(-EINVAL);
-			}
-			__cache_inc(cache);
-
-		} else {
-			cache = cache_create(cache_md, metadata_dev, block_size,
-					     origin_sectors, cache_sectors,
-					     policy_name, read_only, error);
-			*created = 1;
-		}
-	}
-
-	return cache;
 }
 
 static int create_inactive_cache_policy(struct cache *cache,
@@ -1636,6 +1514,7 @@ static int set_cache_policy(struct cache *cache)
 		DMERR("could not load cache mappings");
 		return r;
 	}
+	load_stats(cache);
 
 	return 0;
 }
@@ -1659,16 +1538,12 @@ static void cache_dtr(struct dm_target *ti)
 	pr_alert("cache cell clashs:\t%u\n", (unsigned) atomic_read(&cache->cache_cell_clash));
 	pr_alert("commits:\t\t%u\n", (unsigned) atomic_read(&cache->commit_count));
 
-	mutex_lock(&dm_cache_table.mutex);
-
 	unbind_control_target(cache, ti);
-	__cache_dec(cache);
+	__cache_destroy(cache);
 	dm_put_device(ti, c->metadata_dev);
 	dm_put_device(ti, c->origin_dev);
 	dm_put_device(ti, c->cache_dev);
 	kfree(c);
-
-	mutex_unlock(&dm_cache_table.mutex);
 }
 
 static sector_t get_dev_size(struct dm_dev *dev)
@@ -1749,7 +1624,7 @@ static int parse_cache_features(struct dm_arg_set *as, struct cache_features *cf
  */
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
-	int r, cache_created = 0;
+	int r = -EINVAL;
 	struct cache_c *c;
 	struct cache *cache;
 	struct cache_features cf;
@@ -1758,15 +1633,9 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	struct dm_dev *metadata_dev, *origin_dev, *cache_dev;
 	const char *policy_name;
 
-	/*
-	 * FIXME Remove validation from scope of lock.
-	 */
-	mutex_lock(&dm_cache_table.mutex);
-
 	if (argc < 5) {
 		ti->error = "Invalid argument count";
-		r = -EINVAL;
-		goto bad_unlock;
+		return -EINVAL;
 	}
 	as.argc = argc;
 	as.argv = argv;
@@ -1775,8 +1644,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
 	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
 		ti->error = "Invalid data block size";
-		r = -EINVAL;
-		goto bad_unlock;
+	        return -EINVAL;
 	}
 
 	policy_name = argv[4];
@@ -1784,7 +1652,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &metadata_dev);
 	if (r) {
 		ti->error = "Error opening metadata device";
-		goto bad_unlock;
+		goto bad_metadata;
 	}
 
 	r = dm_get_device(ti, argv[1], FMODE_READ | FMODE_WRITE, &origin_dev);
@@ -1823,9 +1691,9 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad;
 	}
 
-	cache = __cache_find(dm_table_get_md(ti->table), metadata_dev->bdev,
-			     block_size, origin_sectors, cache_sectors, policy_name,
-			     cf.metadata_mode == CM_READ_ONLY, &ti->error, &cache_created);
+	cache = cache_create(metadata_dev->bdev, block_size,
+			     origin_sectors, cache_sectors, policy_name,
+			     cf.metadata_mode == CM_READ_ONLY, &ti->error);
 	if (IS_ERR(cache)) {
 		r = PTR_ERR(cache);
 		goto bad_free_c;
@@ -1858,12 +1726,10 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	c->callbacks.congested_fn = cache_is_congested;
 	dm_table_add_target_callbacks(ti->table, &c->callbacks);
 
-	mutex_unlock(&dm_cache_table.mutex);
-
 	return 0;
 
 bad_max_io_len:
-	__cache_dec(cache);
+	__cache_destroy(cache);
 bad_free_c:
 	kfree(c);
 bad:
@@ -1872,9 +1738,7 @@ bad_cache:
 	dm_put_device(ti, origin_dev);
 bad_origin:
 	dm_put_device(ti, metadata_dev);
-bad_unlock:
-	mutex_unlock(&dm_cache_table.mutex);
-
+bad_metadata:
 	return r;
 }
 
@@ -2205,8 +2069,6 @@ static struct target_type cache_target = {
 static int __init dm_cache_init(void)
 {
 	int r;
-
-	cache_table_init();
 
 	r = dm_register_target(&cache_target);
 	if (r)
