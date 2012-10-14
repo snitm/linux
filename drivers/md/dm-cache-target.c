@@ -1636,6 +1636,7 @@ static int set_cache_policy(struct cache *cache)
 		DMERR("could not load cache mappings");
 		return r;
 	}
+	load_stats(cache);
 
 	return 0;
 }
