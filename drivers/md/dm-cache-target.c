@@ -1066,25 +1066,7 @@ static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock, boo
 static int create_inactive_cache_policy(struct cache *cache,
 					const char *policy_name, char **error)
 {
-	const char *old_policy_name;
-
-	old_policy_name = dm_cache_metadata_read_policy_name(cache->cmd);
-	if (IS_ERR(old_policy_name)) {
-		*error = "Error reading cache's policy name from metadata";
-		return PTR_ERR(old_policy_name);
-	}
-
-	if (cache->inactive_policy) {
-		/* cleanup previous table load's inactive policy */
-		dm_cache_policy_destroy(cache->inactive_policy);
-		cache->inactive_policy = NULL;
-	}
-
-	if (cache->policy && old_policy_name &&
-	    !strcasecmp(old_policy_name, policy_name))
-		/* policy isn't being switched, keep existing active policy */
-		return 0;
-
+	cache->policy = NULL;
 	cache->inactive_policy =
 		dm_cache_policy_create(policy_name, cache->cache_size,
 				       cache->origin_sectors,
@@ -1114,9 +1096,6 @@ static int set_cache_policy(struct cache *cache)
 	    strcasecmp(old_policy_name, new_policy_name)) {
 		DMINFO("switching cache policy from %s to %s",
 		       old_policy_name, new_policy_name);
-
-		if (cache->policy)
-			dm_cache_policy_destroy(cache->policy);
 
 		reset_stats(cache);
 		/* TODO: cleanup old policy's on-disk metadata */
