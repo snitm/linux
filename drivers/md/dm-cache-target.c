@@ -153,10 +153,11 @@ struct cache {
 
 	bool need_tick_bio;
 
+	char policy_name[CACHE_POLICY_NAME_SIZE];
 	struct dm_cache_policy *policy;
+	struct dm_cache_policy *inactive_policy;
 	bool quiescing;
 	bool commit_requested;
-	bool loaded_mappings;
 
 	atomic_t read_hit;
 	atomic_t read_miss;
@@ -263,6 +264,26 @@ static void save_stats(struct cache *cache)
 	stats.write_misses = atomic_read(&cache->write_miss);
 
 	dm_cache_set_stats(cache->cmd, &stats);
+}
+
+static void reset_incore_stats(struct cache *cache)
+{
+	atomic_set(&cache->demotion, 0);
+	atomic_set(&cache->promotion, 0);
+	atomic_set(&cache->copies_avoided, 0);
+	atomic_set(&cache->cache_cell_clash, 0);
+	atomic_set(&cache->commit_count, 0);
+}
+
+static void reset_stats(struct cache *cache)
+{
+	atomic_set(&cache->read_hit, 0);
+	atomic_set(&cache->read_miss, 0);
+	atomic_set(&cache->write_hit, 0);
+	atomic_set(&cache->write_miss, 0);
+	save_stats(cache);
+
+	reset_incore_stats(cache);
 }
 
 /*----------------------------------------------------------------
@@ -1019,7 +1040,10 @@ static void cache_dtr(struct dm_target *ti)
 	dm_put_device(ti, cache->metadata_dev);
 	dm_put_device(ti, cache->origin_dev);
 	dm_put_device(ti, cache->cache_dev);
-	dm_cache_policy_destroy(cache->policy);
+	if (cache->policy)
+		dm_cache_policy_destroy(cache->policy);
+	if (cache->inactive_policy)
+		dm_cache_policy_destroy(cache->inactive_policy);
 
 	kfree(cache);
 }
@@ -1039,17 +1063,79 @@ static int load_mapping(void *context, dm_block_t oblock, dm_block_t cblock, boo
 	return policy_load_mapping(cache->policy, oblock, cblock);
 }
 
-static int create_cache_policy(struct cache *cache,
-			       const char *policy_name, char **error)
+static int create_inactive_cache_policy(struct cache *cache,
+					const char *policy_name, char **error)
 {
-	cache->policy =
+	const char *old_policy_name;
+
+	old_policy_name = dm_cache_metadata_read_policy_name(cache->cmd);
+	if (IS_ERR(old_policy_name)) {
+		*error = "Error reading cache's policy name from metadata";
+		return PTR_ERR(old_policy_name);
+	}
+
+	if (cache->inactive_policy) {
+		/* cleanup previous table load's inactive policy */
+		dm_cache_policy_destroy(cache->inactive_policy);
+		cache->inactive_policy = NULL;
+	}
+
+	if (cache->policy && old_policy_name &&
+	    !strcasecmp(old_policy_name, policy_name))
+		/* policy isn't being switched, keep existing active policy */
+		return 0;
+
+	cache->inactive_policy =
 		dm_cache_policy_create(policy_name, cache->cache_size,
 				       cache->origin_sectors,
 				       cache->sectors_per_block);
-	if (!cache->policy) {
-		*error = "Error creating cache's policy";
+	if (!cache->inactive_policy) {
+		*error = "Error creating cache's new policy";
 		return -ENOMEM;
 	}
+
+	return 0;
+}
+
+static int set_cache_policy(struct cache *cache)
+{
+	int r;
+	const char *old_policy_name, *new_policy_name;
+
+	/* is the cache policy being switched? */
+	old_policy_name = dm_cache_metadata_read_policy_name(cache->cmd);
+	if (IS_ERR(old_policy_name)) {
+		DMERR("%s: Error reading cache's policy name from metadata",
+		      __func__);
+		return PTR_ERR(old_policy_name);
+	}
+	new_policy_name = dm_cache_policy_get_name(cache->inactive_policy);
+	if (old_policy_name && new_policy_name &&
+	    strcasecmp(old_policy_name, new_policy_name)) {
+		DMINFO("switching cache policy from %s to %s",
+		       old_policy_name, new_policy_name);
+
+		if (cache->policy)
+			dm_cache_policy_destroy(cache->policy);
+
+		reset_stats(cache);
+		/* TODO: cleanup old policy's on-disk metadata */
+	}
+
+	r = dm_cache_metadata_write_policy_name(cache->cmd, new_policy_name);
+	if (r) {
+		DMERR("could not write cache's policy name to metadata");
+		return r;
+	}
+	cache->policy = cache->inactive_policy;
+	cache->inactive_policy = NULL;
+
+	r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
+	if (r) {
+		DMERR("could not load cache mappings");
+		return r;
+	}
+	load_stats(cache);
 
 	return 0;
 }
@@ -1169,16 +1255,10 @@ static struct cache *cache_create(struct block_device *metadata_dev,
 
 	cache->quiescing = false;
 	cache->commit_requested = false;
-	cache->loaded_mappings = false;
 	cache->last_commit_jiffies = jiffies;
 
 	load_stats(cache);
-
-	atomic_set(&cache->demotion, 0);
-	atomic_set(&cache->promotion, 0);
-	atomic_set(&cache->copies_avoided, 0);
-	atomic_set(&cache->cache_cell_clash, 0);
-	atomic_set(&cache->commit_count, 0);
+	reset_incore_stats(cache);
 
 	return cache;
 
@@ -1285,11 +1365,12 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
 		goto bad_max_io_len;
 
-	r = create_cache_policy(cache, policy_name, &ti->error);
+	r = create_inactive_cache_policy(cache, policy_name, &ti->error);
 	if (r)
 		goto bad_max_io_len;
 
 	cache->ti = ti;
+	memcpy(cache->policy_name, policy_name, CACHE_POLICY_NAME_SIZE);
 	cache->metadata_dev = metadata_dev;
 	cache->origin_dev = origin_dev;
 	cache->cache_dev = cache_dev;
@@ -1463,12 +1544,10 @@ static int cache_preresume(struct dm_target *ti)
 	int r = 0;
 	struct cache *cache = ti->private;
 
-	if (!cache->loaded_mappings) {
-		r = dm_cache_load_mappings(cache->cmd, load_mapping, cache);
+	if (cache->inactive_policy) {
+		r = set_cache_policy(cache);
 		if (r)
-			DMERR("couldn't load cache mappings");
-
-		cache->loaded_mappings = true;
+			return r;
 	}
 
 	return r;
@@ -1512,7 +1591,7 @@ static int cache_status(struct dm_target *ti, status_type_t type,
 		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
 		DMEMIT("%llu ", (unsigned long long) cache->sectors_per_block);
-		DMEMIT("%s", dm_cache_policy_get_name(cache->policy));
+		DMEMIT("%s", cache->policy_name);
 	}
 
 	return 0;
