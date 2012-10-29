@@ -875,7 +875,6 @@ static int __dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty
 
 	cmd->changed = 1;
 	return 0;
-
 }
 
 int dm_cache_set_dirty(struct dm_cache_metadata *cmd,
