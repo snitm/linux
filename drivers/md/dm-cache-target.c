@@ -1339,6 +1339,7 @@ static int create_cache_policy(struct cache *cache,
 			       const char *policy_name, char **error,
 			       struct dm_arg_set *as)
 {
+	cache->policy_nr_args = as->argc;
 	cache->policy =
 		dm_cache_policy_create(policy_name, cache->cache_size,
 				       cache->origin_sectors,
@@ -1357,8 +1358,8 @@ static struct kmem_cache *_endio_hook_cache;
 
 static struct cache *cache_create(struct block_device *metadata_dev,
 				  sector_t block_size, sector_t origin_sectors,
-				  sector_t cache_sectors, const char *policy_name,
-				  bool read_only, char **error)
+				  sector_t cache_sectors, bool read_only,
+				  char **error)
 {
 	int r;
 	void *err_p = ERR_PTR(-ENOMEM);
@@ -1547,7 +1548,7 @@ static int parse_cache_features(struct dm_arg_set *as, struct cache_features *cf
 			cf->ctr_set = true;
 
 		} else {
-			ti->error = "Unrecognised pool feature requested";
+			ti->error = "Unrecognised cache feature requested";
 			r = -EINVAL;
 			break;
 		}
@@ -1559,20 +1560,21 @@ static int parse_cache_features(struct dm_arg_set *as, struct cache_features *cf
 /*
  * Construct a cache device mapping:
  *
- * cache <metadata dev> <cache dev> <origin dev> <block size> <#feature_args> [<arg>]* <policy> <#policy_args> [<arg>]*
+ * cache <metadata dev> <cache dev> <origin dev> <block size>
+ *	 <#feature_args> [<arg>]* <policy> [<#policy_args> [<arg>]*]
  *
  * metadata dev		  : fast device holding the persistent metadata
  * cache dev		  : fast device holding cached data blocks
  * origin dev		  : slow device holding original data blocks
  * block size		  : cache unit size in sectors
- * #feature args [<arg>]* : number of feature arguments followed by optional arguments
+ * #feature args [<arg>]* : number of optional feature arguments followed by the arguments
  * policy		  : the replacement policy to use
- * #policy_args  [<arg>]* : number of policy arguments followed by optional arguments; see policy plugin for instances
- *			    (key value pairs count as 2; delimiter is space)
+ * #policy_args	 [<arg>]* : number of optional policy arguments followed by the arguments;
+ *			    see policy plugin for details (space delimited key value pairs count as 2)
  *
  * Optional feature arguments are:
- *	     write-back: write back cache allowing cache block contents to differ from origin blocks for performance reasons
- *	     write-through: write through caching prohibiting cache block content from being distinct from origin block content
+ *   write-back: allows cache blocks to differ from origin blocks for improved performance
+ *   write-through: prohibits cache blocks from being different than origin blocks
  */
 static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 {
@@ -1640,30 +1642,27 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 
 	policy_name = dm_shift_arg(&as);
 	policy_argc = dm_shift_arg(&as);
-
-	if (kstrtoul(policy_argc, 10, &tmp) || tmp != as.argc) {
+	if (policy_argc && (kstrtoul(policy_argc, 10, &tmp) || tmp != as.argc)) {
 		ti->error = "Invalid policy argument count";
 		goto bad_policy_argc;
 	}
 
 	cache = cache_create(metadata_dev->bdev, block_size,
 			     origin_sectors, cache_sectors,
-			     policy_name, false, &ti->error);
+			     false, &ti->error);
 	if (IS_ERR(cache)) {
 		r = PTR_ERR(cache);
 		goto bad_cache_create;
 	}
 
-	cache->policy_nr_args = tmp;
-	cache->cf = cf;
-
-	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
-		goto bad_max_io_len;
-
 	r = create_cache_policy(cache, policy_name, &ti->error, &as);
 	if (r)
 		goto bad_max_io_len;
 
+	if (dm_set_target_max_io_len(ti, cache->sectors_per_block))
+		goto bad_max_io_len;
+
+	cache->cf = cf;
 	cache->ti = ti;
 	cache->metadata_dev = metadata_dev;
 	cache->cache_dev = cache_dev;
