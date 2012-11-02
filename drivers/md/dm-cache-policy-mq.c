@@ -1060,6 +1060,9 @@ static int process_policy_args(struct mq_policy *mq, int argc, char **argv)
 {
 	unsigned u;
 
+	if (!argc)
+		return 0;
+
 	if (argc != 2 && argc != 4)
 		return -EINVAL;
 
@@ -1102,7 +1105,8 @@ static struct dm_cache_policy *mq_create(dm_cblock_t cache_size,
 	if (r)
 		goto bad_policy_args;
 
-	iot_init(&mq->tracker, mq->threshold_args[PATTERN_SEQUENTIAL], mq->threshold_args[PATTERN_RANDOM]);
+	iot_init(&mq->tracker, mq->threshold_args[PATTERN_SEQUENTIAL],
+		 mq->threshold_args[PATTERN_RANDOM]);
 
 	mq->cache_size = cache_size;
 	mq->tick_protected = 0;
