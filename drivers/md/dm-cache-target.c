@@ -63,7 +63,6 @@ static void free_bitset(unsigned long *bits)
 /*----------------------------------------------------------------*/
 
 #define PRISON_CELLS 1024
-#define ENDIO_HOOK_POOL_SIZE 1024
 #define MIGRATION_POOL_SIZE 128
 #define COMMIT_PERIOD HZ
 #define MIGRATION_COUNT_WINDOW 10
@@ -162,7 +161,6 @@ struct cache {
 	struct dm_bio_prison *prison;
 	struct dm_deferred_set *all_io_ds;
 
-	mempool_t *endio_hook_pool;
 	mempool_t *migration_pool;
 	struct dm_cache_migration *next_migration;
 
@@ -494,7 +492,8 @@ static void remap_to_cache(struct cache *cache, struct bio *bio,
 static void check_if_tick_bio_needed(struct cache *cache, struct bio *bio)
 {
 	unsigned long flags;
-	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct dm_cache_endio_hook *h =
+		dm_bio_get_per_request_data(bio, sizeof(struct dm_cache_endio_hook));
 
 	spin_lock_irqsave(&cache->lock, flags);
 	if (cache->need_tick_bio &&
@@ -927,7 +926,8 @@ static void defer_bio(struct cache *cache, struct bio *bio)
 
 static void process_flush_bio(struct cache *cache, struct bio *bio)
 {
-	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct dm_cache_endio_hook *h =
+		dm_bio_get_per_request_data(bio, sizeof(struct dm_cache_endio_hook));
 
 	BUG_ON(bio->bi_size);
 	if (!h->req_nr)
@@ -981,7 +981,8 @@ static void process_bio(struct cache *cache, struct prealloc *structs,
 	dm_oblock_t block = get_bio_block(cache, bio);
 	struct dm_bio_prison_cell *old_ocell, *new_ocell;
 	struct policy_result lookup_result;
-	struct dm_cache_endio_hook *h = dm_get_mapinfo(bio)->ptr;
+	struct dm_cache_endio_hook *h =
+		dm_bio_get_per_request_data(bio, sizeof(struct dm_cache_endio_hook));
 	bool can_migrate = may_migrate(cache);
 	bool discarded_block = is_discarded_oblock(cache, block);
 
@@ -1297,9 +1298,6 @@ static void destroy(struct cache *cache)
 	if (cache->migration_pool)
 		mempool_destroy(cache->migration_pool);
 
-	if (cache->endio_hook_pool)
-		mempool_destroy(cache->endio_hook_pool);
-
 	if (cache->all_io_ds)
 		dm_deferred_set_destroy(cache->all_io_ds);
 
@@ -1606,9 +1604,8 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 
 /*----------------------------------------------------------------*/
 
-// FIXME: get rid of these
+// FIXME: get rid of this
 static struct kmem_cache *_migration_cache;
-static struct kmem_cache *_endio_hook_cache;
 
 static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 			       char **error)
@@ -1661,6 +1658,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	ti->private = cache;
 	ti->num_flush_requests = 2;
 	ti->flush_supported = true;
+	ti->per_request_data = sizeof(struct dm_cache_endio_hook);
 
 	ti->num_discard_requests = 1;
 	ti->discards_supported = true;
@@ -1764,13 +1762,6 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
-	cache->endio_hook_pool = mempool_create_slab_pool(ENDIO_HOOK_POOL_SIZE,
-							  _endio_hook_cache);
-	if (!cache->endio_hook_pool) {
-		*error = "Error creating cache's endio_hook mempool";
-		goto bad;
-	}
-
 	cache->migration_pool = mempool_create_slab_pool(MIGRATION_POOL_SIZE,
 							 _migration_cache);
 	if (!cache->migration_pool) {
@@ -1838,7 +1829,7 @@ static struct dm_cache_endio_hook *hook_endio(struct cache *cache,
 					      struct bio *bio, unsigned req_nr)
 {
 	struct dm_cache_endio_hook *h =
-		mempool_alloc(cache->endio_hook_pool, GFP_NOIO);
+		dm_bio_get_per_request_data(bio, sizeof(struct dm_cache_endio_hook));
 
 	h->tick = false;
 	h->req_nr = req_nr;
@@ -1847,8 +1838,7 @@ static struct dm_cache_endio_hook *hook_endio(struct cache *cache,
 	return h;
 }
 
-static int cache_map(struct dm_target *ti, struct bio *bio,
-		     union map_info *map_context)
+static int cache_map(struct dm_target *ti, struct bio *bio)
 {
 	struct cache *cache = ti->private;
 
@@ -1870,8 +1860,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 		return DM_MAPIO_REMAPPED;
 	}
 
-	h = map_context->ptr = hook_endio(cache, bio,
-					  map_context->target_request_nr);
+	h = hook_endio(cache, bio, dm_bio_get_target_request_nr(bio));
 
 	if (bio->bi_rw & (REQ_FLUSH | REQ_FUA | REQ_DISCARD)) {
 		defer_bio(cache, bio);
@@ -1929,12 +1918,12 @@ static int cache_map(struct dm_target *ti, struct bio *bio,
 	return DM_MAPIO_REMAPPED;
 }
 
-static int cache_end_io(struct dm_target *ti, struct bio *bio,
-			int error, union map_info *info)
+static int cache_end_io(struct dm_target *ti, struct bio *bio, int error)
 {
 	struct cache *cache = ti->private;
 	unsigned long flags;
-	struct dm_cache_endio_hook *h = info->ptr;
+	struct dm_cache_endio_hook *h =
+		dm_bio_get_per_request_data(bio, sizeof(struct dm_cache_endio_hook));
 
 	if (h->tick) {
 		policy_tick(cache->policy);
@@ -1945,7 +1934,6 @@ static int cache_end_io(struct dm_target *ti, struct bio *bio,
 	}
 
 	check_for_quiesced_migrations(cache, h);
-	mempool_free(h, cache->endio_hook_pool);
 	return 0;
 }
 
@@ -2326,14 +2314,8 @@ static int __init dm_cache_init(void)
 	if (!_migration_cache)
 		goto bad_migration_cache;
 
-	_endio_hook_cache = KMEM_CACHE(dm_cache_endio_hook, 0);
-	if (!_endio_hook_cache)
-		goto bad_endio_hook_cache;
-
 	return 0;
 
-bad_endio_hook_cache:
-	kmem_cache_destroy(_migration_cache);
 bad_migration_cache:
 	dm_unregister_target(&cache_target);
 
@@ -2345,7 +2327,6 @@ static void dm_cache_exit(void)
 	dm_unregister_target(&cache_target);
 
 	kmem_cache_destroy(_migration_cache);
-	kmem_cache_destroy(_endio_hook_cache);
 }
 
 module_init(dm_cache_init);
