@@ -213,6 +213,12 @@ struct dm_target {
 	 */
 	unsigned num_discard_requests;
 
+	/*
+	 * The size of data allocated for every bio sent to the target.
+	 * The data is accessible with function dm_bio_get_per_request_data.
+	 */
+	unsigned per_request_data;
+
 	/* target specific data */
 	void *private;
 
@@ -256,6 +262,30 @@ struct dm_target_callbacks {
 	struct list_head list;
 	int (*congested_fn) (struct dm_target_callbacks *, int);
 };
+
+/*
+ * For bio-based dm.
+ * One of these is allocated per target within a bio.
+ * This structure shouldn't be touched by target drivers, it is here
+ * so that we can inline dm_bio_get_per_request_data and
+ * dm_per_request_data_get_bio.
+ */
+struct dm_target_io {
+	struct dm_io *io;
+	struct dm_target *ti;
+	union map_info info;
+	struct bio clone;
+};
+
+static inline void *dm_bio_get_per_request_data(struct bio *bio, size_t data_size)
+{
+	return (char *)bio - offsetof(struct dm_target_io, clone) - data_size;
+}
+
+static inline struct bio *dm_per_request_data_get_bio(void *data, size_t data_size)
+{
+	return (struct bio *)((char *)data + data_size + offsetof(struct dm_target_io, clone));
+}
 
 int dm_register_target(struct target_type *t);
 void dm_unregister_target(struct target_type *t);
