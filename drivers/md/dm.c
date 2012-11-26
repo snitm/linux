@@ -1098,6 +1098,20 @@ static struct dm_target_io *alloc_tio(struct clone_info *ci,
 	return tio;
 }
 
+static unsigned num_duplicate_bios_needed(struct dm_target *ti, struct bio *bio)
+{
+	if (bio->bi_rw & REQ_FLUSH)
+		return ti->num_flush_requests;
+
+	if (bio->bi_rw & REQ_DISCARD)
+		return ti->num_discard_requests;
+
+	if (ti->type->get_num_duplicates)
+		return ti->type->get_num_duplicates(ti, bio);
+
+	return 1;
+}
+
 static void __issue_target_request(struct clone_info *ci, struct dm_target *ti,
 				   unsigned request_nr, sector_t len)
 {
@@ -1122,12 +1136,12 @@ static void __issue_target_request(struct clone_info *ci, struct dm_target *ti,
 }
 
 static void __issue_target_requests(struct clone_info *ci, struct dm_target *ti,
-				    unsigned num_requests, sector_t len)
+				    sector_t len)
 {
-	unsigned request_nr;
+	unsigned i, num_requests = num_duplicate_bios_needed(ti, ci->bio);
 
-	for (request_nr = 0; request_nr < num_requests; request_nr++)
-		__issue_target_request(ci, ti, request_nr, len);
+	for (i = 0; i < num_requests; i++)
+		__issue_target_request(ci, ti, i, len);
 }
 
 static int __clone_and_map_empty_flush(struct clone_info *ci)
@@ -1137,9 +1151,25 @@ static int __clone_and_map_empty_flush(struct clone_info *ci)
 
 	BUG_ON(bio_has_data(ci->bio));
 	while ((ti = dm_table_get_target(ci->map, target_nr++)))
-		__issue_target_requests(ci, ti, ti->num_flush_requests, 0);
+		__issue_target_requests(ci, ti, 0);
 
 	return 0;
+}
+
+static void __issue_bio_to_target(struct clone_info *ci, struct dm_target *ti,
+				  struct bio *bio, sector_t sector,
+				  unsigned short idx, unsigned bv_count,
+				  unsigned len, struct bio_set *bs)
+{
+	unsigned i, num_duplicates = num_duplicate_bios_needed(ti, bio);
+	struct dm_target_io *tio;
+
+	for (i = 0; i < num_duplicates; i++) {
+		tio = alloc_tio(ci, ti, bio->bi_max_vecs);
+		tio->target_request_nr = i;
+		clone_bio(tio, bio, sector, idx, bv_count, len, bs);
+		__map_bio(ti, tio);
+	}
 }
 
 /*
@@ -1148,12 +1178,10 @@ static int __clone_and_map_empty_flush(struct clone_info *ci)
 static void __clone_and_map_simple(struct clone_info *ci, struct dm_target *ti)
 {
 	struct bio *bio = ci->bio;
-	struct dm_target_io *tio;
 
-	tio = alloc_tio(ci, ti, bio->bi_max_vecs);
-	clone_bio(tio, bio, ci->sector, ci->idx, bio->bi_vcnt - ci->idx,
-		  ci->sector_count, ci->md->bs);
-	__map_bio(ti, tio);
+	__issue_bio_to_target(ci, ti, bio, ci->sector, ci->idx,
+			      bio->bi_vcnt - ci->idx, ci->sector_count,
+			      ci->md->bs);
 	ci->sector_count = 0;
 }
 
@@ -1181,7 +1209,7 @@ static int __clone_and_map_discard(struct clone_info *ci)
 		else
 			len = min(ci->sector_count, max_io_len(ci->sector, ti));
 
-		__issue_target_requests(ci, ti, ti->num_discard_requests, len);
+		__issue_target_requests(ci, ti, len);
 
 		ci->sector += len;
 	} while (ci->sector_count -= len);
@@ -1231,10 +1259,8 @@ static int __clone_and_map(struct clone_info *ci)
 			len += bv_len;
 		}
 
-		tio = alloc_tio(ci, ti, bio->bi_max_vecs);
-		clone_bio(tio, bio, ci->sector, ci->idx, i - ci->idx, len,
-			  ci->md->bs);
-		__map_bio(ti, tio);
+		__issue_bio_to_target(ci, ti, bio, ci->sector, ci->idx,
+				      i - ci->idx, len, ci->md->bs);
 
 		ci->sector += len;
 		ci->sector_count -= len;
