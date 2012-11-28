@@ -1032,7 +1032,7 @@ struct clone_info {
  */
 static void split_bvec(struct dm_target_io *tio, struct bio *bio,
 		       sector_t sector, unsigned short idx, unsigned int offset,
-		       unsigned int len, struct bio_set *bs)
+		       unsigned int len)
 {
 	struct bio *clone = &tio->clone;
 	struct bio_vec *bv = bio->bi_io_vec + idx;
@@ -1183,6 +1183,23 @@ static void __issue_bio_to_target(struct clone_info *ci, struct dm_target *ti,
 	}
 }
 
+static void __split_and_issue_bio_to_target(struct clone_info *ci,
+					    struct dm_target *ti,
+					    struct bio *bio, sector_t sector,
+					    unsigned short idx, unsigned bv_count,
+					    unsigned len)
+{
+	unsigned i, num_duplicates = num_duplicate_bios_needed(ti, bio);
+	struct dm_target_io *tio;
+
+	for (i = 0; i < num_duplicates; i++) {
+		tio = alloc_tio(ci, ti, 1);
+		tio->target_request_nr = i;
+		split_bvec(tio, bio, sector, idx, bv_count, len);
+		__map_bio(ti, tio);
+	}
+}
+
 /*
  * Perform all io with a single clone.
  */
@@ -1232,7 +1249,6 @@ static int __clone_and_map(struct clone_info *ci)
 	struct bio *bio = ci->bio;
 	struct dm_target *ti;
 	sector_t len = 0, max;
-	struct dm_target_io *tio;
 
 	if (unlikely(bio->bi_rw & REQ_DISCARD))
 		return __clone_and_map_discard(ci);
@@ -1295,11 +1311,8 @@ static int __clone_and_map(struct clone_info *ci)
 
 			len = min(remaining, max);
 
-			tio = alloc_tio(ci, ti, 1);
-			split_bvec(tio, bio, ci->sector, ci->idx,
-				   bv->bv_offset + offset, len, ci->md->bs);
-
-			__map_bio(ti, tio);
+			__split_and_issue_bio_to_target(ci, ti, bio, ci->sector, ci->idx,
+							bv->bv_offset + offset, len);
 
 			ci->sector += len;
 			ci->sector_count -= len;
