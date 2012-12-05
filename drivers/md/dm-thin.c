@@ -559,8 +559,7 @@ static void overwrite_endio(struct bio *bio, int err)
 /*
  * This sends the bios in the cell back to the deferred_bios list.
  */
-static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell,
-		       dm_block_t data_block)
+static void cell_defer(struct thin_c *tc, struct dm_bio_prison_cell *cell)
 {
 	struct pool *pool = tc->pool;
 	unsigned long flags;
@@ -646,7 +645,7 @@ static void process_prepared_mapping(struct dm_thin_new_mapping *m)
 		cell_defer_except(tc, m->cell);
 		bio_endio(bio, 0);
 	} else
-		cell_defer(tc, m->cell, m->data_block);
+		cell_defer(tc, m->cell);
 
 out:
 	list_del(&m->list);
@@ -1115,8 +1114,8 @@ static void process_shared_bio(struct thin_c *tc, struct bio *bio,
 
 		h->shared_read_entry = dm_deferred_entry_inc(pool->shared_read_ds);
 
-		cell_release_singleton(pool, cell, bio);
 		remap_and_issue(tc, bio, lookup_result->block);
+		cell_defer_except(tc, cell);
 	}
 }
 
@@ -1131,8 +1130,8 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	 * Remap empty bios (flushes) immediately, without provisioning.
 	 */
 	if (!bio->bi_size) {
-		cell_release_singleton(pool, cell, bio);
 		remap_and_issue(tc, bio, 0);
+		cell_defer_except(tc, cell);
 		return;
 	}
 
@@ -1141,8 +1140,8 @@ static void provision_block(struct thin_c *tc, struct bio *bio, dm_block_t block
 	 */
 	if (bio_data_dir(bio) == READ) {
 		zero_fill_bio(bio);
-		cell_release_singleton(pool, cell, bio);
 		bio_endio(bio, 0);
+		cell_defer_except(tc, cell);
 		return;
 	}
 
@@ -1188,27 +1187,22 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	r = dm_thin_find_block(tc->td, block, 1, &lookup_result);
 	switch (r) {
 	case 0:
-		/*
-		 * We can release this cell now.  This thread is the only
-		 * one that puts bios into a cell, and we know there were
-		 * no preceding bios.
-		 */
-		/*
-		 * TODO: this will probably have to change when discard goes
-		 * back in.
-		 */
-		cell_release_singleton(pool, cell, bio);
-
 		if (lookup_result.shared)
 			process_shared_bio(tc, bio, block, &lookup_result);
 		else
 			remap_and_issue(tc, bio, lookup_result.block);
+
+		/*
+		 * We can release this cell now.  But there may be other
+		 * other bios in the cell from the thin_map function.
+		 */
+		cell_defer_except(tc, cell);
 		break;
 
 	case -ENODATA:
 		if (bio_data_dir(bio) == READ && tc->origin_dev) {
-			cell_release_singleton(pool, cell, bio);
 			remap_to_origin_and_issue(tc, bio);
+			cell_defer_except(tc, cell);
 		} else
 			provision_block(tc, bio, block, cell);
 		break;
@@ -1216,8 +1210,8 @@ static void process_bio(struct thin_c *tc, struct bio *bio)
 	default:
 		DMERR_LIMIT("%s: dm_thin_find_block() failed, error = %d",
 			    __func__, r);
-		cell_release_singleton(pool, cell, bio);
 		bio_io_error(bio);
+		cell_defer_except(tc, cell);
 		break;
 	}
 }
