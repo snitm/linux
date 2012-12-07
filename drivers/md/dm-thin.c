@@ -1449,8 +1449,7 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio,
 			 * of doing so.  Just error it.
 			 */
 			bio_io_error(bio);
-			r = DM_MAPIO_SUBMITTED;
-			break;
+			return DM_MAPIO_SUBMITTED;
 		}
 		/* fall through */
 
