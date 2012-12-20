@@ -1234,7 +1234,7 @@ typedef bool (*is_split_required_fn)(struct dm_target *ti);
 
 static bool is_split_required_for_discard(struct dm_target *ti)
 {
-	return !ti->split_discard_requests;
+	return ti->split_discard_requests;
 }
 
 static int __clone_and_map_changing_extent_only(struct clone_info *ci,
@@ -1258,7 +1258,7 @@ static int __clone_and_map_changing_extent_only(struct clone_info *ci,
 		if (!get_num_requests || !get_num_requests(ti))
 			return -EOPNOTSUPP;
 
-		if (is_split_required && is_split_required(ti))
+		if (is_split_required && !is_split_required(ti))
 			len = min(ci->sector_count, max_io_len_target_boundary(ci->sector, ti));
 		else
 			len = min(ci->sector_count, max_io_len(ci->sector, ti));
