@@ -623,7 +623,7 @@ static void cache_set_kobject_init(struct cache_set *c)
 	kobject_init(&c->internal, &cache_set_internal_obj);
 }
 
-SHOW(__cache)
+SHOW(__bcache)
 {
 	struct cache *ca = container_of(kobj, struct cache, kobj);
 
@@ -716,9 +716,9 @@ SHOW(__cache)
 
 	return 0;
 }
-SHOW_LOCKED(cache)
+SHOW_LOCKED(bcache)
 
-STORE(__cache)
+STORE(__bcache)
 {
 	struct cache *ca = container_of(kobj, struct cache, kobj);
 
@@ -785,11 +785,11 @@ STORE(__cache)
 
 	return size;
 }
-STORE_LOCKED(cache)
+STORE_LOCKED(bcache)
 
 static void cache_kobject_init(struct cache *ca)
 {
-	static struct attribute *cache_files[] = {
+	static struct attribute *bcache_files[] = {
 		&sysfs_bucket_size,
 		&sysfs_block_size,
 		&sysfs_nbuckets,
@@ -804,7 +804,7 @@ static void cache_kobject_init(struct cache *ca)
 		&sysfs_cache_replacement_policy,
 		NULL
 	};
-	KTYPE(cache, cache_free);
+	KTYPE(bcache, cache_free);
 
-	kobject_init(&ca->kobj, &cache_obj);
+	kobject_init(&ca->kobj, &bcache_obj);
 }
