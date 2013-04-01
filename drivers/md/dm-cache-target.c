@@ -1085,7 +1085,7 @@ static void process_discard_bio(struct cache *cache, struct bio *bio)
 {
 	dm_block_t start_block = dm_sector_div_up(bio->bi_sector,
 						  cache->discard_block_size);
-	dm_block_t end_block = bio->bi_sector + bio_sectors(bio);
+	dm_block_t end_block = bio_end_sector(bio);
 	dm_block_t b;
 
 	end_block = block_div(end_block, cache->discard_block_size);
