@@ -61,6 +61,35 @@ static void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
+/*
+ * There are a couple of places where we let a bio run, but want to do some
+ * work before calling it's endio function.  We do this by temporarily
+ * changing the endio fn.
+ */
+struct hook_info {
+	bio_end_io_t *bi_end_io;
+	void *bi_private;
+};
+
+static void hook_bio(struct hook_info *h, struct bio *bio,
+		     bio_end_io_t *bi_end_io,
+		     void *bi_private)
+{
+	h->bi_end_io = bio->bi_end_io;
+	h->bi_private = bio->bi_private;
+
+	bio->bi_end_io = bi_end_io;
+	bio->bi_private = bi_private;
+}
+
+static void unhook_bio(struct hook_info *h, struct bio *bio)
+{
+	bio->bi_end_io = h->bi_end_io;
+	bio->bi_private = h->bi_private;
+}
+
+/*----------------------------------------------------------------*/
+
 #define PRISON_CELLS 1024
 #define MIGRATION_POOL_SIZE 128
 #define COMMIT_PERIOD HZ
@@ -209,7 +238,7 @@ struct per_bio_data {
 	 */
 	struct cache *cache;
 	dm_cblock_t cblock;
-	bio_end_io_t *saved_bi_end_io;
+	struct hook_info hook_info;
 	struct dm_bio_details bio_details;
 };
 
@@ -226,6 +255,7 @@ struct dm_cache_migration {
 	bool writeback:1;
 	bool demote:1;
 	bool promote:1;
+	bool requeue_holder:1;
 
 	struct dm_bio_prison_cell *old_ocell;
 	struct dm_bio_prison_cell *new_ocell;
@@ -656,7 +686,7 @@ static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
 static void writethrough_endio(struct bio *bio, int err)
 {
 	struct per_bio_data *pb = get_per_bio_data(bio, PB_DATA_SIZE_WT);
-	bio->bi_end_io = pb->saved_bi_end_io;
+	unhook_bio(&pb->hook_info, bio);
 
 	if (err) {
 		bio_endio(bio, err);
@@ -668,7 +698,7 @@ static void writethrough_endio(struct bio *bio, int err)
 
 	/*
 	 * We can't issue this bio directly, since we're in interrupt
-	 * context.  So it get's put on a bio list for processing by the
+	 * context.  So it gets put on a bio list for processing by the
 	 * worker thread.
 	 */
 	defer_writethrough_bio(pb->cache, bio);
@@ -687,9 +717,8 @@ static void remap_to_origin_then_cache(struct cache *cache, struct bio *bio,
 
 	pb->cache = cache;
 	pb->cblock = cblock;
-	pb->saved_bi_end_io = bio->bi_end_io;
+	hook_bio(&pb->hook_info, bio, writethrough_endio, NULL);
 	dm_bio_record(&pb->bio_details, bio);
-	bio->bi_end_io = writethrough_endio;
 
 	remap_to_origin_clear_discard(pb->cache, bio, oblock);
 }
@@ -776,6 +805,8 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 	unsigned long flags;
 	struct cache *cache = mg->cache;
 
+	/* FIXME: what if mg->err? */
+
 	if (mg->writeback) {
 		cell_defer(cache, mg->old_ocell, false);
 		clear_dirty(cache, mg->old_oblock, mg->cblock);
@@ -830,7 +861,12 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 			cleanup_migration(mg);
 
 	} else {
-		cell_defer(cache, mg->new_ocell, true);
+		if (mg->requeue_holder)
+			cell_defer(cache, mg->new_ocell, true);
+		else {
+			bio_endio(mg->new_ocell->holder, 0);
+			cell_defer(cache, mg->new_ocell, false);
+		}
 		clear_dirty(cache, mg->new_oblock, mg->cblock);
 		cleanup_migration(mg);
 	}
@@ -879,6 +915,40 @@ static void issue_copy_real(struct dm_cache_migration *mg)
 		migration_failure(mg);
 }
 
+static void overwrite_endio(struct bio *bio, int err)
+{
+	struct per_bio_data *pb = get_per_bio_data(bio);
+	struct dm_cache_migration *mg = bio->bi_private;
+	struct cache *cache = mg->cache;
+	unsigned long flags;
+
+	if (err)
+		mg->err = true;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	list_add_tail(&mg->list, &cache->completed_migrations);
+	unhook_bio(&pb->hook_info, bio);
+	mg->requeue_holder = false;
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wake_worker(cache);
+}
+
+static void issue_overwrite(struct dm_cache_migration *mg, struct bio *bio)
+{
+	struct per_bio_data *pb = get_per_bio_data(bio);
+
+	hook_bio(&pb->hook_info, bio, overwrite_endio, mg);
+	remap_to_cache_dirty(mg->cache, bio, mg->new_oblock, mg->cblock);
+	generic_make_request(bio);
+}
+
+static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
+{
+	return (bio_data_dir(bio) == WRITE) &&
+		(bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
+}
+
 static void avoid_copy(struct dm_cache_migration *mg)
 {
 	atomic_inc(&mg->cache->stats.copies_avoided);
@@ -893,8 +963,17 @@ static void issue_copy(struct dm_cache_migration *mg)
 	if (mg->writeback || mg->demote)
 		avoid = !is_dirty(cache, mg->cblock) ||
 			is_discarded_oblock(cache, mg->old_oblock);
-	else
+	else {
+		struct bio *bio = mg->new_ocell->holder;
+
 		avoid = is_discarded_oblock(cache, mg->new_oblock);
+#if 0
+		if (!avoid && bio_writes_complete_block(cache, bio)) {
+			issue_overwrite(mg, bio);
+			return;
+		}
+#endif
+	}
 
 	avoid ? avoid_copy(mg) : issue_copy_real(mg);
 }
@@ -985,6 +1064,7 @@ static void promote(struct cache *cache, struct prealloc *structs,
 	mg->writeback = false;
 	mg->demote = false;
 	mg->promote = true;
+	mg->requeue_holder = true;
 	mg->cache = cache;
 	mg->new_oblock = oblock;
 	mg->cblock = cblock;
@@ -1006,6 +1086,7 @@ static void writeback(struct cache *cache, struct prealloc *structs,
 	mg->writeback = true;
 	mg->demote = false;
 	mg->promote = false;
+	mg->requeue_holder = true;
 	mg->cache = cache;
 	mg->old_oblock = oblock;
 	mg->cblock = cblock;
@@ -1029,6 +1110,7 @@ static void demote_then_promote(struct cache *cache, struct prealloc *structs,
 	mg->writeback = false;
 	mg->demote = true;
 	mg->promote = true;
+	mg->requeue_holder = true;
 	mg->cache = cache;
 	mg->old_oblock = old_oblock;
 	mg->new_oblock = new_oblock;
@@ -1905,7 +1987,7 @@ static sector_t calculate_discard_block_size(sector_t cache_block_size,
 	return discard_block_size;
 }
 
-#define DEFAULT_MIGRATION_THRESHOLD (2048 * 100)
+#define DEFAULT_MIGRATION_THRESHOLD 2048
 
 static int cache_create(struct cache_args *ca, struct cache **result)
 {
@@ -1930,7 +2012,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
 
-	memcpy(&cache->features, &ca->features, sizeof(cache->features));
+	cache->features = ca->features;
 	ti->per_bio_data_size = get_per_bio_data_size(cache);
 
 	cache->callbacks.congested_fn = cache_is_congested;
