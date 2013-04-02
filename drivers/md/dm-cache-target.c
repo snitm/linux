@@ -917,9 +917,10 @@ static void issue_copy_real(struct dm_cache_migration *mg)
 
 static void overwrite_endio(struct bio *bio, int err)
 {
-	struct per_bio_data *pb = get_per_bio_data(bio);
 	struct dm_cache_migration *mg = bio->bi_private;
 	struct cache *cache = mg->cache;
+	size_t pb_data_size = get_per_bio_data_size(cache);
+	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 	unsigned long flags;
 
 	if (err)
@@ -936,7 +937,9 @@ static void overwrite_endio(struct bio *bio, int err)
 
 static void issue_overwrite(struct dm_cache_migration *mg, struct bio *bio)
 {
-	struct per_bio_data *pb = get_per_bio_data(bio);
+	struct cache *cache = mg->cache;
+	size_t pb_data_size = get_per_bio_data_size(cache);
+	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
 	hook_bio(&pb->hook_info, bio, overwrite_endio, mg);
 	remap_to_cache_dirty(mg->cache, bio, mg->new_oblock, mg->cblock);
