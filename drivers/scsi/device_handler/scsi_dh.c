@@ -485,6 +485,7 @@ struct scsi_dh_data *scsi_dh_alloc_data(const char *name, gfp_t flags)
 
 	return scsi_dh_data;
 }
+EXPORT_SYMBOL_GPL(scsi_dh_alloc_data);
 
 /*
  * scsi_dh_attach - Attach device handler
