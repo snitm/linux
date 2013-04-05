@@ -620,14 +620,14 @@ static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps
 		 * Increments scsi_dh reference, even when using an
 		 * already-attached handler.
 		 */
-		r = scsi_dh_attach(q, m->hw_handler_name);
+		r = scsi_dh_attach(q, m->hw_handler_name, NULL);
 		if (r == -EBUSY) {
 			/*
 			 * Already attached to different hw_handler:
 			 * try to reattach with correct one.
 			 */
 			scsi_dh_detach(q);
-			r = scsi_dh_attach(q, m->hw_handler_name);
+			r = scsi_dh_attach(q, m->hw_handler_name, NULL);
 		}
 
 		if (r < 0) {
