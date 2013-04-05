@@ -678,7 +678,14 @@ static int clariion_bus_attach(struct scsi_device *sdev,
 	unsigned long flags;
 	int err;
 
-	/* FIXME: handle !scsi_dh_data */
+	if (!scsi_dh_data)
+		scsi_dh_data = kzalloc(sizeof(*scsi_dh_data)
+				       + sizeof(*h) , GFP_KERNEL);
+	if (!scsi_dh_data) {
+		sdev_printk(KERN_ERR, sdev, "%s: Attach failed\n",
+			    CLARIION_NAME);
+		return -ENOMEM;
+	}
 
 	scsi_dh_data->scsi_dh = &clariion_dh;
 	h = (struct clariion_dh_data *) scsi_dh_data->buf;
