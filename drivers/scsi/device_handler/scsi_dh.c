@@ -96,7 +96,8 @@ device_handler_match(struct scsi_device_handler *scsi_dh,
  * @scsi_dh - The device handler to attach
  */
 static int scsi_dh_handler_attach(struct scsi_device *sdev,
-				  struct scsi_device_handler *scsi_dh)
+				  struct scsi_device_handler *scsi_dh,
+				  struct scsi_dh_data *scsi_dh_data)
 {
 	int err = 0;
 
@@ -106,7 +107,7 @@ static int scsi_dh_handler_attach(struct scsi_device *sdev,
 		else
 			kref_get(&sdev->scsi_dh_data->kref);
 	} else if (scsi_dh->attach) {
-		err = scsi_dh->attach(sdev);
+		err = scsi_dh->attach(sdev, scsi_dh_data);
 		if (!err) {
 			kref_init(&sdev->scsi_dh_data->kref);
 			sdev->scsi_dh_data->sdev = sdev;
@@ -161,12 +162,17 @@ store_dh_state(struct device *dev, struct device_attribute *attr,
 		return -ENODEV;
 
 	if (!sdev->scsi_dh_data) {
+		struct scsi_dh_data *scsi_dh_data;
+
 		/*
 		 * Attach to a device handler
 		 */
+		scsi_dh_data = scsi_dh_alloc_data(buf, GFP_KERNEL);
+		if (IS_ERR(scsi_dh_data))
+			return PTR_ERR(scsi_dh_data);
 		if (!(scsi_dh = get_device_handler(buf)))
 			return err;
-		err = scsi_dh_handler_attach(sdev, scsi_dh);
+		err = scsi_dh_handler_attach(sdev, scsi_dh, scsi_dh_data);
 	} else {
 		scsi_dh = sdev->scsi_dh_data->scsi_dh;
 		if (!strncmp(buf, "detach", 6)) {
@@ -262,7 +268,7 @@ static int scsi_dh_notifier(struct notifier_block *nb,
 		/* don't care about err */
 		devinfo = device_handler_match(NULL, sdev);
 		if (devinfo)
-			err = scsi_dh_handler_attach(sdev, devinfo);
+			err = scsi_dh_handler_attach(sdev, devinfo, NULL);
 	} else if (action == BUS_NOTIFY_DEL_DEVICE) {
 		device_remove_file(dev, &scsi_dh_state_attr);
 		scsi_dh_handler_detach(sdev, NULL);
@@ -287,7 +293,7 @@ static int scsi_dh_notifier_add(struct device *dev, void *data)
 	sdev = to_scsi_device(dev);
 
 	if (device_handler_match(scsi_dh, sdev))
-		scsi_dh_handler_attach(sdev, scsi_dh);
+		scsi_dh_handler_attach(sdev, scsi_dh, NULL);
 
 	put_device(dev);
 
@@ -466,13 +472,33 @@ int scsi_dh_handler_exist(const char *name)
 }
 EXPORT_SYMBOL_GPL(scsi_dh_handler_exist);
 
+struct scsi_dh_data *scsi_dh_alloc_data(const char *name, gfp_t flags)
+{
+	struct scsi_device_handler *scsi_dh;
+	struct scsi_dh_data *scsi_dh_data;
+	size_t scsi_dh_data_size = sizeof(sizeof(*scsi_dh_data));
+
+	scsi_dh = get_device_handler(name);
+	if (!scsi_dh)
+		return ERR_PTR(-EINVAL);
+
+	if (scsi_dh->get_dh_data_size)
+		scsi_dh_data_size += scsi_dh->get_dh_data_size();
+	scsi_dh_data = kzalloc(scsi_dh_data_size, flags);
+	if (!scsi_dh_data)
+		return ERR_PTR(-ENOMEM);
+
+	return scsi_dh_data;
+}
+
 /*
  * scsi_dh_attach - Attach device handler
  * @q - Request queue that is associated with the scsi_device
  *      the handler should be attached to
  * @name - name of the handler to attach
  */
-int scsi_dh_attach(struct request_queue *q, const char *name)
+int scsi_dh_attach(struct request_queue *q, const char *name,
+		   struct scsi_dh_data *scsi_dh_data)
 {
 	unsigned long flags;
 	struct scsi_device *sdev;
@@ -490,7 +516,7 @@ int scsi_dh_attach(struct request_queue *q, const char *name)
 	spin_unlock_irqrestore(q->queue_lock, flags);
 
 	if (!err) {
-		err = scsi_dh_handler_attach(sdev, scsi_dh);
+		err = scsi_dh_handler_attach(sdev, scsi_dh, scsi_dh_data);
 		put_device(&sdev->sdev_gendev);
 	}
 	return err;

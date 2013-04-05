@@ -64,6 +64,7 @@ struct multipath {
 
 	const char *hw_handler_name;
 	char *hw_handler_params;
+	void *hw_handler_data;
 
 	spinlock_t lock;
 
@@ -207,6 +208,8 @@ static struct multipath *alloc_multipath(struct dm_target *ti)
 			kfree(m);
 			return NULL;
 		}
+		m->hw_handler_name = NULL;
+		m->hw_handler_data = NULL;
 		m->ti = ti;
 		ti->private = m;
 	}
@@ -225,6 +228,7 @@ static void free_multipath(struct multipath *m)
 
 	kfree(m->hw_handler_name);
 	kfree(m->hw_handler_params);
+	kfree(m->hw_handler_data);
 	mempool_destroy(m->mpio_pool);
 	kfree(m);
 }

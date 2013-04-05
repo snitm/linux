@@ -338,7 +338,9 @@ static bool hp_sw_match(struct scsi_device *sdev)
 	return false;
 }
 
-static int hp_sw_bus_attach(struct scsi_device *sdev);
+static size_t hp_sw_dh_data_size(void);
+static int hp_sw_bus_attach(struct scsi_device *sdev,
+			    struct scsi_dh_data *scsi_dh_data);
 static void hp_sw_bus_detach(struct scsi_device *sdev);
 
 static struct scsi_device_handler hp_sw_dh = {
@@ -350,22 +352,22 @@ static struct scsi_device_handler hp_sw_dh = {
 	.activate	= hp_sw_activate,
 	.prep_fn	= hp_sw_prep_fn,
 	.match		= hp_sw_match,
+	.get_dh_data_size = hp_sw_dh_data_size,
 };
 
-static int hp_sw_bus_attach(struct scsi_device *sdev)
+static size_t hp_sw_dh_data_size(void)
 {
-	struct scsi_dh_data *scsi_dh_data;
+	return sizeof(struct hp_sw_dh_data);
+}
+
+static int hp_sw_bus_attach(struct scsi_device *sdev,
+			    struct scsi_dh_data *scsi_dh_data)
+{
 	struct hp_sw_dh_data *h;
 	unsigned long flags;
 	int ret;
 
-	scsi_dh_data = kzalloc(sizeof(*scsi_dh_data)
-			       + sizeof(*h) , GFP_KERNEL);
-	if (!scsi_dh_data) {
-		sdev_printk(KERN_ERR, sdev, "%s: Attach Failed\n",
-			    HP_SW_NAME);
-		return 0;
-	}
+	/* FIXME: handle !scsi_dh_data */
 
 	scsi_dh_data->scsi_dh = &hp_sw_dh;
 	h = (struct hp_sw_dh_data *) scsi_dh_data->buf;
