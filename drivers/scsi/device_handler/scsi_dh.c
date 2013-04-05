@@ -162,17 +162,12 @@ store_dh_state(struct device *dev, struct device_attribute *attr,
 		return -ENODEV;
 
 	if (!sdev->scsi_dh_data) {
-		struct scsi_dh_data *scsi_dh_data;
-
 		/*
 		 * Attach to a device handler
 		 */
-		scsi_dh_data = scsi_dh_alloc_data(buf, GFP_KERNEL);
-		if (IS_ERR(scsi_dh_data))
-			return PTR_ERR(scsi_dh_data);
 		if (!(scsi_dh = get_device_handler(buf)))
 			return err;
-		err = scsi_dh_handler_attach(sdev, scsi_dh, scsi_dh_data);
+		err = scsi_dh_handler_attach(sdev, scsi_dh, NULL);
 	} else {
 		scsi_dh = sdev->scsi_dh_data->scsi_dh;
 		if (!strncmp(buf, "detach", 6)) {
