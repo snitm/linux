@@ -1357,6 +1357,7 @@ static void multipath_postsuspend(struct dm_target *ti)
 static void __attach_scsi_dh(struct multipath *m, struct pgpath *p)
 {
 	int r;
+	char b[BDEVNAME_SIZE];
 	struct request_queue *q = bdev_get_queue(p->path.dev->bdev);
 
 	/*
@@ -1374,7 +1375,8 @@ static void __attach_scsi_dh(struct multipath *m, struct pgpath *p)
 	}
 
 	if (r < 0) {
-		DMERR("error attaching hardware handler"); // FIXME: include device name
+		DMERR("error attaching hardware handler to: %s",
+		      bdevname(p->path.dev->bdev, b));
 		return;
 	}
 	/*
@@ -1385,7 +1387,9 @@ static void __attach_scsi_dh(struct multipath *m, struct pgpath *p)
 	if (m->hw_handler_params) {
 		r = scsi_dh_set_params(q, m->hw_handler_params);
 		if (r < 0) {
-			DMERR("unable to set hardware handler parameters"); // FIXME: include device name
+			DMERR("unable to set hardware handler parameters, "
+			      "detaching hardware handler from: %s",
+			      bdevname(p->path.dev->bdev, b));
 			scsi_dh_detach(q);
 			return;
 		}
