@@ -581,23 +581,25 @@ static bool validate_attached_hardware_handler(struct multipath *m, struct pgpat
 			     strlen(attached_handler_name)))
 			handler_already_attached = true;
 
-		if (m->retain_attached_hw_handler) {
-			handler_already_attached = true;
-			/*
-			 * Reset hw_handler_name to match the attached handler
-			 * and clear any hw_handler_params associated with the
-			 * ignored handler.
-			 *
-			 * NB. This modifies the table line to show the actual
-			 * handler instead of the original table passed in.
-			 */
-			kfree(m->hw_handler_name);
-			m->hw_handler_name = attached_handler_name;
-
-			kfree(m->hw_handler_params);
-			m->hw_handler_params = NULL;
-		} else
+		if (!m->retain_attached_hw_handler) {
 			kfree(attached_handler_name);
+			return handler_already_attached;
+		}
+
+		handler_already_attached = true;
+		/*
+		 * Reset hw_handler_name to match the attached handler
+		 * and clear any hw_handler_params associated with the
+		 * ignored handler.
+		 *
+		 * NB. This modifies the table line to show the actual
+		 * handler instead of the original table passed in.
+		 */
+		kfree(m->hw_handler_name);
+		m->hw_handler_name = attached_handler_name;
+
+		kfree(m->hw_handler_params);
+		m->hw_handler_params = NULL;
 	}
 
 	return handler_already_attached;
