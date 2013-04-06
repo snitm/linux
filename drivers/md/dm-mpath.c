@@ -567,7 +567,7 @@ static int parse_path_selector(struct dm_arg_set *as, struct priority_group *pg,
 
 /*
  * Check if scsi_dh_data allocation can be avoided (as an optimization)
- * based which, if any, device handler is already attached.
+ * based on which, if any, device handler is already attached.
  * Return: @true if scsi_dh_data allocation may be skipped.
  */
 static bool validate_attached_hardware_handler(struct multipath *m, struct pgpath *p)
@@ -645,7 +645,7 @@ static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps
 		goto bad;
 	}
 
-	if (m->hw_handler_name || m->retain_attached_hw_handler)
+	if (m->retain_attached_hw_handler || m->hw_handler_name)
 		skip_scsi_dh_alloc_data = validate_attached_hardware_handler(m, p);
 
 	if (m->hw_handler_name && !skip_scsi_dh_alloc_data) {
