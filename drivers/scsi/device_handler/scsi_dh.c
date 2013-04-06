@@ -94,6 +94,8 @@ device_handler_match(struct scsi_device_handler *scsi_dh,
  * scsi_dh_handler_attach - Attach a device handler to a device
  * @sdev - SCSI device the device handler should attach to
  * @scsi_dh - The device handler to attach
+ * @scsi_dh_data - if not NULL it is either assigned to sdev->scsi_dh_data
+ *                 on attach or free'd if the scsi_dh is already attached.
  */
 static int scsi_dh_handler_attach(struct scsi_device *sdev,
 				  struct scsi_device_handler *scsi_dh,
@@ -104,8 +106,10 @@ static int scsi_dh_handler_attach(struct scsi_device *sdev,
 	if (sdev->scsi_dh_data) {
 		if (sdev->scsi_dh_data->scsi_dh != scsi_dh)
 			err = -EBUSY;
-		else
+		else {
 			kref_get(&sdev->scsi_dh_data->kref);
+			kfree(scsi_dh_data);
+		}
 	} else if (scsi_dh->attach) {
 		err = scsi_dh->attach(sdev, scsi_dh_data);
 		if (!err) {

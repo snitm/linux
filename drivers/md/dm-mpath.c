@@ -36,6 +36,7 @@ struct pgpath {
 
 	struct dm_path path;
 	struct delayed_work activate_path;
+	struct scsi_dh_data *hw_handler_data;
 };
 
 #define path_to_pgpath(__pgp) container_of((__pgp), struct pgpath, path)
@@ -64,7 +65,6 @@ struct multipath {
 
 	const char *hw_handler_name;
 	char *hw_handler_params;
-	void *hw_handler_data;
 
 	spinlock_t lock;
 
@@ -145,6 +145,7 @@ static struct pgpath *alloc_pgpath(void)
 
 static void free_pgpath(struct pgpath *pgpath)
 {
+	kfree(pgpath->hw_handler_data);
 	kfree(pgpath);
 }
 
@@ -209,7 +210,6 @@ static struct multipath *alloc_multipath(struct dm_target *ti)
 			return NULL;
 		}
 		m->hw_handler_name = NULL;
-		m->hw_handler_data = NULL;
 		m->ti = ti;
 		ti->private = m;
 	}
@@ -228,7 +228,6 @@ static void free_multipath(struct multipath *m)
 
 	kfree(m->hw_handler_name);
 	kfree(m->hw_handler_params);
-	kfree(m->hw_handler_data);
 	mempool_destroy(m->mpio_pool);
 	kfree(m);
 }
@@ -568,13 +567,13 @@ static int parse_path_selector(struct dm_arg_set *as, struct priority_group *pg,
 }
 
 static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps,
-			       struct dm_target *ti)
+				 struct dm_target *ti)
 {
 	int r;
 	struct pgpath *p;
 	struct multipath *m = ti->private;
 	struct request_queue *q = NULL;
-	const char *attached_handler_name;
+	const char *attached_handler_name = NULL, *hw_handler_name = NULL;
 
 	/* we need at least a path arg */
 	if (as->argc < 1) {
@@ -593,59 +592,33 @@ static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps
 		goto bad;
 	}
 
-	if (m->retain_attached_hw_handler || m->hw_handler_name)
-		q = bdev_get_queue(p->path.dev->bdev);
-
 	if (m->retain_attached_hw_handler) {
+		q = bdev_get_queue(p->path.dev->bdev);
 		attached_handler_name = scsi_dh_attached_handler_name(q, GFP_KERNEL);
-		if (attached_handler_name) {
-			/*
-			 * Reset hw_handler_name to match the attached handler
-			 * and clear any hw_handler_params associated with the
-			 * ignored handler.
-			 *
-			 * NB. This modifies the table line to show the actual
-			 * handler instead of the original table passed in.
-			 */
-			kfree(m->hw_handler_name);
-			m->hw_handler_name = attached_handler_name;
-
-			kfree(m->hw_handler_params);
-			m->hw_handler_params = NULL;
-		}
+		/* FIXME: just switch here like we've been doing! */
 	}
 
-	if (m->hw_handler_name) {
-		/*
-		 * Increments scsi_dh reference, even when using an
-		 * already-attached handler.
-		 */
-		r = scsi_dh_attach(q, m->hw_handler_name, NULL);
-		if (r == -EBUSY) {
-			/*
-			 * Already attached to different hw_handler:
-			 * try to reattach with correct one.
-			 */
-			scsi_dh_detach(q);
-			r = scsi_dh_attach(q, m->hw_handler_name, NULL);
-		}
+	if (attached_handler_name)
+		hw_handler_name = attached_handler_name;			
+	else if (m->hw_handler_name)
+		hw_handler_name = kstrdup(m->hw_handler_name, GFP_KERNEL);
 
-		if (r < 0) {
-			ti->error = "error attaching hardware handler";
+	if (hw_handler_name) {
+		/*
+		 * Pre-allocate the scsi_dh_data for this path.  Either the scsi_dh
+		 * will take ownership of the memory or free_pgpath() will clean it up.
+		 * - NOTE: if the attached scsi_dh is reused then scsi_dh_data will be
+		 *   free'd by scsi_dh_attach().
+		 */
+		p->hw_handler_data = scsi_dh_alloc_data(hw_handler_name, GFP_KERNEL);
+		if (IS_ERR(p->hw_handler_data)) {
+			ti->error = "error allocating hardware handler data";
 			dm_put_device(ti, p->path.dev);
+			r = PTR_ERR(p->hw_handler_data);
 			goto bad;
 		}
-
-		if (m->hw_handler_params) {
-			r = scsi_dh_set_params(q, m->hw_handler_params);
-			if (r < 0) {
-				ti->error = "unable to set hardware "
-							"handler parameters";
-				scsi_dh_detach(q);
-				dm_put_device(ti, p->path.dev);
-				goto bad;
-			}
-		}
+		kfree(hw_handler_name);
+		hw_handler_name = NULL;
 	}
 
 	r = ps->type->add_path(ps, &p->path, as->argc, as->argv, &ti->error);
@@ -658,6 +631,7 @@ static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps
 
  bad:
 	free_pgpath(p);
+	kfree(hw_handler_name);
 	return ERR_PTR(r);
 }
 
@@ -1353,16 +1327,102 @@ static void multipath_postsuspend(struct dm_target *ti)
 	mutex_unlock(&m->work_mutex);
 }
 
+static void __establish_hw_handler_name(struct multipath *m, struct request_queue *q)
+{
+	const char *attached_handler_name;
+
+	/* FIXME: must happen during ctr due to memory allocation! */
+	attached_handler_name = scsi_dh_attached_handler_name(q, GFP_KERNEL);
+	if (attached_handler_name) {
+		/*
+		 * Reset hw_handler_name to match the attached handler
+		 * and clear any hw_handler_params associated with the
+		 * ignored handler.
+		 *
+		 * NB. This modifies the table line to show the actual
+		 * handler instead of the original table passed in.
+		 */
+		kfree(m->hw_handler_name);
+		m->hw_handler_name = attached_handler_name;
+
+		kfree(m->hw_handler_params);
+		m->hw_handler_params = NULL;
+	}
+}
+
+static void __attach_scsi_dh(struct multipath *m, struct request_queue *q,
+			     struct pgpath *p)
+{
+	int r;
+
+	/*
+	 * Increments scsi_dh reference, even when using an
+	 * already-attached handler.
+	 */
+	r = scsi_dh_attach(q, m->hw_handler_name, p->hw_handler_data);
+	if (r == -EBUSY) {
+		/*
+		 * Already attached to different hw_handler:
+		 * try to reattach with correct one.
+		 */
+		scsi_dh_detach(q);
+		r = scsi_dh_attach(q, m->hw_handler_name, p->hw_handler_data);
+	}
+
+	if (r < 0) {
+		DMERR("error attaching hardware handler"); // FIXME: include device name
+		return;
+	}
+	/*
+	 * scsi_dh_attach() took ownership of p->hw_handler_data.
+	 */
+	p->hw_handler_data = NULL;
+
+	if (m->hw_handler_params) {
+		r = scsi_dh_set_params(q, m->hw_handler_params);
+		if (r < 0) {
+			DMERR("unable to set hardware handler parameters"); // FIXME: include device name
+			scsi_dh_detach(q);
+			return;
+		}
+	}
+}
+
 /*
  * Restore the queue_if_no_path setting.
  */
 static void multipath_resume(struct dm_target *ti)
 {
+	struct request_queue *q = NULL;
 	struct multipath *m = (struct multipath *) ti->private;
+	struct priority_group *pg;
+	struct pgpath *p;
 	unsigned long flags;
 
 	spin_lock_irqsave(&m->lock, flags);
 	m->queue_if_no_path = m->saved_queue_if_no_path;
+
+	if (m->retain_attached_hw_handler) {
+		/*
+		 * This only needs to be done once! (use first path in the first pg).
+		 */
+		pg = list_first_entry(&m->priority_groups, struct priority_group, list);
+		p = list_first_entry(&pg->pgpaths, struct pgpath, list);
+		q = bdev_get_queue(p->path.dev->bdev);
+		__establish_hw_handler_name(m, q);
+	}
+
+	if (!m->hw_handler_name)
+		goto out;
+
+	/* Attach the named scsi_dh to all paths in the priority groups */
+	list_for_each_entry(pg, &m->priority_groups, list) {
+		list_for_each_entry(p, &pg->pgpaths, list) {
+			q = bdev_get_queue(p->path.dev->bdev);
+			__attach_scsi_dh(m, q, p); /* FIXME: check error */
+		}
+	}
+out:
 	spin_unlock_irqrestore(&m->lock, flags);
 }
 
