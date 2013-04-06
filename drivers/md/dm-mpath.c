@@ -209,7 +209,6 @@ static struct multipath *alloc_multipath(struct dm_target *ti)
 			kfree(m);
 			return NULL;
 		}
-		m->hw_handler_name = NULL;
 		m->ti = ti;
 		ti->private = m;
 	}
@@ -1333,10 +1332,10 @@ static void multipath_postsuspend(struct dm_target *ti)
 	mutex_unlock(&m->work_mutex);
 }
 
-static void __attach_scsi_dh(struct multipath *m, struct request_queue *q,
-			     struct pgpath *p)
+static void __attach_scsi_dh(struct multipath *m, struct pgpath *p)
 {
 	int r;
+	struct request_queue *q = bdev_get_queue(p->path.dev->bdev);
 
 	/*
 	 * Increments scsi_dh reference, even when using an
@@ -1376,7 +1375,6 @@ static void __attach_scsi_dh(struct multipath *m, struct request_queue *q,
  */
 static void multipath_resume(struct dm_target *ti)
 {
-	struct request_queue *q = NULL;
 	struct multipath *m = (struct multipath *) ti->private;
 	struct priority_group *pg;
 	struct pgpath *p;
@@ -1390,10 +1388,8 @@ static void multipath_resume(struct dm_target *ti)
 
 	/* Attach the named scsi_dh to all paths in the priority groups */
 	list_for_each_entry(pg, &m->priority_groups, list) {
-		list_for_each_entry(p, &pg->pgpaths, list) {
-			q = bdev_get_queue(p->path.dev->bdev);
-			__attach_scsi_dh(m, q, p);
-		}
+		list_for_each_entry(p, &pg->pgpaths, list)
+			__attach_scsi_dh(m, p);
 	}
 out:
 	spin_unlock_irqrestore(&m->lock, flags);
