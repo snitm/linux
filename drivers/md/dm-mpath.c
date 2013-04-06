@@ -566,9 +566,7 @@ static int parse_path_selector(struct dm_arg_set *as, struct priority_group *pg,
 }
 
 /*
- * Check if scsi_dh_data allocation can be avoided (as an optimization)
- * based on which, if any, device handler is already attached.
- * Return: @true if handler is already attached (and scsi_dh_data alloc may be skipped).
+ * Return: @true if handler is already attached.
  */
 static bool validate_attached_hardware_handler(struct multipath *m, struct pgpath *p)
 {
@@ -580,18 +578,11 @@ static bool validate_attached_hardware_handler(struct multipath *m, struct pgpat
 	attached_handler_name = scsi_dh_attached_handler_name(q, GFP_KERNEL);
 	if (attached_handler_name) {
 		if (!strncmp(attached_handler_name, m->hw_handler_name,
-			     strlen(m->hw_handler_name))) {
-			/*
-			 * Given the desired scsi_dh is already attached it'll just
-			 * be re-used along with it's existing scsi_dh_data. (caveat:
-			 * in the highly unlikely event of a scsi_dh_detach racing
-			 * with resume's scsi_dh_attach: the scsi_dh_data will be
-			 * allocated by resume's scsi_dh_attach using GFP_NOIO).
-			 */
+			     strlen(attached_handler_name)))
 			handler_already_attached = true;
-		}
 
 		if (m->retain_attached_hw_handler) {
+			handler_already_attached = true;
 			/*
 			 * Reset hw_handler_name to match the attached handler
 			 * and clear any hw_handler_params associated with the
@@ -605,14 +596,6 @@ static bool validate_attached_hardware_handler(struct multipath *m, struct pgpat
 
 			kfree(m->hw_handler_params);
 			m->hw_handler_params = NULL;
-
-			/*
-			 * Since we're retaining the attached scsi_dh there shouldn't
-			 * be any need to preallocate scsi_dh_data since it would
-			 * go unused (the same scsi_dh_detach race caveat mentioned
-			 * above applies here).
-			 */
-			handler_already_attached = true;
 		} else
 			kfree(attached_handler_name);
 	}
@@ -645,6 +628,10 @@ static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps
 		goto bad;
 	}
 
+	/*
+	 * Check if scsi_dh_data allocation can be avoided (as an optimization)
+	 * based on which, if any, device handler is already attached.
+	 */
 	if (m->retain_attached_hw_handler || m->hw_handler_name)
 		skip_scsi_dh_alloc_data = validate_attached_hardware_handler(m, p);
 
@@ -652,8 +639,6 @@ static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps
 		/*
 		 * Pre-allocate the scsi_dh_data for this path.  Either the scsi_dh
 		 * will take ownership of the memory or free_pgpath() will clean it up.
-		 * - NOTE: if the attached scsi_dh is retained then scsi_dh_data will
-		 *   be free'd by scsi_dh_attach().
 		 */
 		p->hw_handler_data = scsi_dh_alloc_data(m->hw_handler_name, GFP_KERNEL);
 		if (IS_ERR(p->hw_handler_data)) {
@@ -1377,7 +1362,8 @@ static void __attach_scsi_dh(struct multipath *m, struct pgpath *p)
 
 	/*
 	 * Increments scsi_dh reference, even when using an
-	 * already-attached handler.
+	 * already-attached handler.  On success, scsi_dh_attach() will
+	 * take ownership of p->hw_handler_data.
 	 */
 	r = scsi_dh_attach(q, m->hw_handler_name, p->hw_handler_data);
 	if (r == -EBUSY) {
