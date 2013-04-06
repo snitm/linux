@@ -565,32 +565,16 @@ static int parse_path_selector(struct dm_arg_set *as, struct priority_group *pg,
 	return 0;
 }
 
-static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps,
-				 struct dm_target *ti)
+/*
+ * Check if scsi_dh_data allocation can be avoided (as an optimization)
+ * based which, if any, device handler is already attached.
+ * Return: @true if scsi_dh_data allocation may be skipped.
+ */
+static bool validate_attached_hardware_handler(struct multipath *m, struct pgpath *p)
 {
-	int r;
-	struct pgpath *p;
-	struct multipath *m = ti->private;
-	struct request_queue *q = NULL;
+	struct request_queue *q;
 	const char *attached_handler_name;
 	bool skip_scsi_dh_alloc_data = false;
-
-	/* we need at least a path arg */
-	if (as->argc < 1) {
-		ti->error = "no device given";
-		return ERR_PTR(-EINVAL);
-	}
-
-	p = alloc_pgpath();
-	if (!p)
-		return ERR_PTR(-ENOMEM);
-
-	r = dm_get_device(ti, dm_shift_arg(as), dm_table_get_mode(ti->table),
-			  &p->path.dev);
-	if (r) {
-		ti->error = "error getting device";
-		goto bad;
-	}
 
 	q = bdev_get_queue(p->path.dev->bdev);
 	attached_handler_name = scsi_dh_attached_handler_name(q, GFP_KERNEL);
@@ -632,6 +616,37 @@ static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps
 		} else
 			kfree(attached_handler_name);
 	}
+
+	return skip_scsi_dh_alloc_data;
+}
+
+static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps,
+				 struct dm_target *ti)
+{
+	int r;
+	struct pgpath *p;
+	struct multipath *m = ti->private;
+	bool skip_scsi_dh_alloc_data = false;
+
+	/* we need at least a path arg */
+	if (as->argc < 1) {
+		ti->error = "no device given";
+		return ERR_PTR(-EINVAL);
+	}
+
+	p = alloc_pgpath();
+	if (!p)
+		return ERR_PTR(-ENOMEM);
+
+	r = dm_get_device(ti, dm_shift_arg(as), dm_table_get_mode(ti->table),
+			  &p->path.dev);
+	if (r) {
+		ti->error = "error getting device";
+		goto bad;
+	}
+
+	if (m->hw_handler_name || m->retain_attached_hw_handler)
+		skip_scsi_dh_alloc_data = validate_attached_hardware_handler(m, p);
 
 	if (m->hw_handler_name && !skip_scsi_dh_alloc_data) {
 		/*
