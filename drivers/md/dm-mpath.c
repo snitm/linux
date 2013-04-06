@@ -568,13 +568,13 @@ static int parse_path_selector(struct dm_arg_set *as, struct priority_group *pg,
 /*
  * Check if scsi_dh_data allocation can be avoided (as an optimization)
  * based on which, if any, device handler is already attached.
- * Return: @true if scsi_dh_data allocation may be skipped.
+ * Return: @true if handler is already attached (and scsi_dh_data alloc may be skipped).
  */
 static bool validate_attached_hardware_handler(struct multipath *m, struct pgpath *p)
 {
 	struct request_queue *q;
 	const char *attached_handler_name;
-	bool skip_scsi_dh_alloc_data = false;
+	bool handler_already_attached = false;
 
 	q = bdev_get_queue(p->path.dev->bdev);
 	attached_handler_name = scsi_dh_attached_handler_name(q, GFP_KERNEL);
@@ -588,7 +588,7 @@ static bool validate_attached_hardware_handler(struct multipath *m, struct pgpat
 			 * with resume's scsi_dh_attach: the scsi_dh_data will be
 			 * allocated by resume's scsi_dh_attach using GFP_NOIO).
 			 */
-			skip_scsi_dh_alloc_data = true;
+			handler_already_attached = true;
 		}
 
 		if (m->retain_attached_hw_handler) {
@@ -612,12 +612,12 @@ static bool validate_attached_hardware_handler(struct multipath *m, struct pgpat
 			 * go unused (the same scsi_dh_detach race caveat mentioned
 			 * above applies here).
 			 */
-			skip_scsi_dh_alloc_data = true;
+			handler_already_attached = true;
 		} else
 			kfree(attached_handler_name);
 	}
 
-	return skip_scsi_dh_alloc_data;
+	return handler_already_attached;
 }
 
 static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps,
