@@ -858,7 +858,7 @@ static int rdac_bus_attach(struct scsi_device *sdev,
 
 	if (!scsi_dh_data)
 		scsi_dh_data = kzalloc(sizeof(*scsi_dh_data)
-				       + sizeof(*h) , GFP_KERNEL);
+				       + sizeof(*h) , GFP_NOIO);
 	if (!scsi_dh_data) {
 		sdev_printk(KERN_ERR, sdev, "%s: Attach failed\n",
 			    RDAC_NAME);

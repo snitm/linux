@@ -573,6 +573,7 @@ static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps
 	struct multipath *m = ti->private;
 	struct request_queue *q = NULL;
 	const char *attached_handler_name;
+	bool skip_scsi_dh_alloc_data = false;
 
 	/* we need at least a path arg */
 	if (as->argc < 1) {
@@ -591,10 +592,22 @@ static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps
 		goto bad;
 	}
 
-	if (m->retain_attached_hw_handler) {
-		q = bdev_get_queue(p->path.dev->bdev);
-		attached_handler_name = scsi_dh_attached_handler_name(q, GFP_KERNEL);
-		if (attached_handler_name) {
+	q = bdev_get_queue(p->path.dev->bdev);
+	attached_handler_name = scsi_dh_attached_handler_name(q, GFP_KERNEL);
+	if (attached_handler_name) {
+		if (!strncmp(attached_handler_name, m->hw_handler_name,
+			     strlen(m->hw_handler_name))) {
+			/*
+			 * Given the desired scsi_dh is already attached it'll just
+			 * be re-used along with it's existing scsi_dh_data. (caveat:
+			 * in the highly unlikely event of a scsi_dh_detach racing
+			 * with resume's scsi_dh_attach: the scsi_dh_data will be
+			 * allocated by resume's scsi_dh_attach using GFP_NOIO).
+			 */
+			skip_scsi_dh_alloc_data = true;
+		}
+
+		if (m->retain_attached_hw_handler) {
 			/*
 			 * Reset hw_handler_name to match the attached handler
 			 * and clear any hw_handler_params associated with the
@@ -608,10 +621,19 @@ static struct pgpath *parse_path(struct dm_arg_set *as, struct path_selector *ps
 
 			kfree(m->hw_handler_params);
 			m->hw_handler_params = NULL;
-		}
+
+			/*
+			 * Since we're retaining the attached scsi_dh there shouldn't
+			 * be any need to preallocate scsi_dh_data since it would
+			 * go unused (the same scsi_dh_detach race caveat mentioned
+			 * above applies here).
+			 */
+			skip_scsi_dh_alloc_data = true;
+		} else
+			kfree(attached_handler_name);
 	}
 
-	if (m->hw_handler_name) {
+	if (m->hw_handler_name && !skip_scsi_dh_alloc_data) {
 		/*
 		 * Pre-allocate the scsi_dh_data for this path.  Either the scsi_dh
 		 * will take ownership of the memory or free_pgpath() will clean it up.
