@@ -338,7 +338,11 @@ static bool hp_sw_match(struct scsi_device *sdev)
 	return false;
 }
 
-static size_t hp_sw_dh_data_size(void);
+static size_t hp_sw_dh_data_size(void)
+{
+	return sizeof(struct hp_sw_dh_data);
+}
+
 static int hp_sw_bus_attach(struct scsi_device *sdev,
 			    struct scsi_dh_data *scsi_dh_data);
 static void hp_sw_bus_detach(struct scsi_device *sdev);
@@ -354,11 +358,6 @@ static struct scsi_device_handler hp_sw_dh = {
 	.match		= hp_sw_match,
 	.get_dh_data_size = hp_sw_dh_data_size,
 };
-
-static size_t hp_sw_dh_data_size(void)
-{
-	return sizeof(struct hp_sw_dh_data);
-}
 
 static int hp_sw_bus_attach(struct scsi_device *sdev,
 			    struct scsi_dh_data *scsi_dh_data)

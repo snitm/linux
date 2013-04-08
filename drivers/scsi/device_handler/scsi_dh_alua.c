@@ -798,7 +798,11 @@ static bool alua_match(struct scsi_device *sdev)
 	return (scsi_device_tpgs(sdev) != 0);
 }
 
-static size_t alua_dh_data_size(void);
+static size_t alua_dh_data_size(void)
+{
+	return sizeof(struct alua_dh_data);
+}
+
 static int alua_bus_attach(struct scsi_device *sdev,
 			   struct scsi_dh_data *scsi_dh_data);
 static void alua_bus_detach(struct scsi_device *sdev);
@@ -815,11 +819,6 @@ static struct scsi_device_handler alua_dh = {
 	.match = alua_match,
 	.get_dh_data_size = alua_dh_data_size,
 };
-
-static size_t alua_dh_data_size(void)
-{
-	return sizeof(struct alua_dh_data);
-}
 
 /*
  * alua_bus_attach - Attach device handler

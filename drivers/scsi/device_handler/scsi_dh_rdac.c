@@ -824,7 +824,11 @@ static bool rdac_match(struct scsi_device *sdev)
 	return false;
 }
 
-static size_t rdac_dh_data_size(void);
+static size_t rdac_dh_data_size(void)
+{
+	return sizeof(struct rdac_dh_data);
+}
+
 static int rdac_bus_attach(struct scsi_device *sdev,
 			   struct scsi_dh_data *scsi_dh_data);
 static void rdac_bus_detach(struct scsi_device *sdev);
@@ -841,11 +845,6 @@ static struct scsi_device_handler rdac_dh = {
 	.match = rdac_match,
 	.get_dh_data_size = rdac_dh_data_size,
 };
-
-static size_t rdac_dh_data_size(void)
-{
-	return sizeof(struct rdac_dh_data);
-}
 
 static int rdac_bus_attach(struct scsi_device *sdev,
 			   struct scsi_dh_data *scsi_dh_data)

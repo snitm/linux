@@ -647,7 +647,11 @@ static bool clariion_match(struct scsi_device *sdev)
 	return false;
 }
 
-static size_t clariion_dh_data_size(void);
+static size_t clariion_dh_data_size(void)
+{
+	return sizeof(struct clariion_dh_data);
+}
+
 static int clariion_bus_attach(struct scsi_device *sdev,
 			       struct scsi_dh_data *scsi_dh_data);
 static void clariion_bus_detach(struct scsi_device *sdev);
@@ -665,11 +669,6 @@ static struct scsi_device_handler clariion_dh = {
 	.match		= clariion_match,
 	.get_dh_data_size = clariion_dh_data_size,
 };
-
-static size_t clariion_dh_data_size(void)
-{
-	return sizeof(struct clariion_dh_data);
-}
 
 static int clariion_bus_attach(struct scsi_device *sdev,
 			       struct scsi_dh_data *scsi_dh_data)
