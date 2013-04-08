@@ -798,7 +798,13 @@ static bool alua_match(struct scsi_device *sdev)
 	return (scsi_device_tpgs(sdev) != 0);
 }
 
-static int alua_bus_attach(struct scsi_device *sdev);
+static size_t alua_dh_data_size(void)
+{
+	return sizeof(struct alua_dh_data);
+}
+
+static int alua_bus_attach(struct scsi_device *sdev,
+			   struct scsi_dh_data *scsi_dh_data);
 static void alua_bus_detach(struct scsi_device *sdev);
 
 static struct scsi_device_handler alua_dh = {
@@ -811,21 +817,23 @@ static struct scsi_device_handler alua_dh = {
 	.activate = alua_activate,
 	.set_params = alua_set_params,
 	.match = alua_match,
+	.get_dh_data_size = alua_dh_data_size,
 };
 
 /*
  * alua_bus_attach - Attach device handler
  * @sdev: device to be attached to
  */
-static int alua_bus_attach(struct scsi_device *sdev)
+static int alua_bus_attach(struct scsi_device *sdev,
+			   struct scsi_dh_data *scsi_dh_data)
 {
-	struct scsi_dh_data *scsi_dh_data;
 	struct alua_dh_data *h;
 	unsigned long flags;
 	int err = SCSI_DH_OK;
 
-	scsi_dh_data = kzalloc(sizeof(*scsi_dh_data)
-			       + sizeof(*h) , GFP_KERNEL);
+	if (!scsi_dh_data)
+		scsi_dh_data = kzalloc(sizeof(*scsi_dh_data)
+				       + sizeof(*h) , GFP_NOIO);
 	if (!scsi_dh_data) {
 		sdev_printk(KERN_ERR, sdev, "%s: Attach failed\n",
 			    ALUA_DH_NAME);

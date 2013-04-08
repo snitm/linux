@@ -647,7 +647,13 @@ static bool clariion_match(struct scsi_device *sdev)
 	return false;
 }
 
-static int clariion_bus_attach(struct scsi_device *sdev);
+static size_t clariion_dh_data_size(void)
+{
+	return sizeof(struct clariion_dh_data);
+}
+
+static int clariion_bus_attach(struct scsi_device *sdev,
+			       struct scsi_dh_data *scsi_dh_data);
 static void clariion_bus_detach(struct scsi_device *sdev);
 
 static struct scsi_device_handler clariion_dh = {
@@ -661,17 +667,19 @@ static struct scsi_device_handler clariion_dh = {
 	.prep_fn	= clariion_prep_fn,
 	.set_params	= clariion_set_params,
 	.match		= clariion_match,
+	.get_dh_data_size = clariion_dh_data_size,
 };
 
-static int clariion_bus_attach(struct scsi_device *sdev)
+static int clariion_bus_attach(struct scsi_device *sdev,
+			       struct scsi_dh_data *scsi_dh_data)
 {
-	struct scsi_dh_data *scsi_dh_data;
 	struct clariion_dh_data *h;
 	unsigned long flags;
 	int err;
 
-	scsi_dh_data = kzalloc(sizeof(*scsi_dh_data)
-			       + sizeof(*h) , GFP_KERNEL);
+	if (!scsi_dh_data)
+		scsi_dh_data = kzalloc(sizeof(*scsi_dh_data)
+				       + sizeof(*h) , GFP_NOIO);
 	if (!scsi_dh_data) {
 		sdev_printk(KERN_ERR, sdev, "%s: Attach failed\n",
 			    CLARIION_NAME);
