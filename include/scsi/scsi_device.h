@@ -201,13 +201,12 @@ struct scsi_device_handler {
 	const char *name;
 	const struct scsi_dh_devlist *devlist;
 	int (*check_sense)(struct scsi_device *, struct scsi_sense_hdr *);
-	int (*attach)(struct scsi_device *, struct scsi_dh_data *);
+	int (*attach)(struct scsi_device *);
 	void (*detach)(struct scsi_device *);
 	int (*activate)(struct scsi_device *, activate_complete, void *);
 	int (*prep_fn)(struct scsi_device *, struct request *);
 	int (*set_params)(struct scsi_device *, const char *);
 	bool (*match)(struct scsi_device *);
-	size_t (*get_dh_data_size)(void);
 };
 
 struct scsi_dh_data {
