@@ -116,15 +116,6 @@ void down_read_nested(struct rw_semaphore *sem, int subclass)
 
 EXPORT_SYMBOL(down_read_nested);
 
-void down_read_non_owner(struct rw_semaphore *sem)
-{
-	might_sleep();
-
-	__down_read(sem);
-}
-
-EXPORT_SYMBOL(down_read_non_owner);
-
 void _down_write_nest_lock(struct rw_semaphore *sem, struct lockdep_map *nest)
 {
 	might_sleep();
