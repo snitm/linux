@@ -1,3 +1,9 @@
+/*
+ * Some low level IO code, and hacks for various block layer limitations
+ *
+ * Copyright 2010, 2011 Kent Overstreet <kent.overstreet@gmail.com>
+ * Copyright 2012 Google, Inc.
+ */
 
 #include "bcache.h"
 #include "bset.h"

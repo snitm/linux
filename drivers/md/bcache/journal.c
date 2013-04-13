@@ -1,3 +1,8 @@
+/*
+ * bcache journalling code, for btree insertions
+ *
+ * Copyright 2012 Google, Inc.
+ */
 
 #include "bcache.h"
 #include "btree.h"
@@ -49,7 +54,7 @@ reread:		left = ca->sb.bucket_size - offset;
 
 		bio->bi_end_io	= journal_read_endio;
 		bio->bi_private = &op->cl;
-		bio_map(bio, data);
+		bch_bio_map(bio, data);
 
 		closure_bio_submit(bio, &op->cl, ca);
 		closure_sync(&op->cl);
@@ -288,9 +293,9 @@ int bch_journal_replay(struct cache_set *s, struct list_head *list,
 		BUG_ON(i->pin && atomic_read(i->pin) != 1);
 
 		if (n != i->j.seq)
-			pr_err("journal entries %llu-%llu "
-			       "missing! (replaying %llu-%llu)\n",
-			       n, i->j.seq - 1, start, end);
+			pr_err(
+		"journal entries %llu-%llu missing! (replaying %llu-%llu)\n",
+		n, i->j.seq - 1, start, end);
 
 		for (k = i->j.start;
 		     k < end(&i->j);
@@ -302,7 +307,7 @@ int bch_journal_replay(struct cache_set *s, struct list_head *list,
 			op->journal = i->pin;
 			atomic_inc(op->journal);
 
-			ret = bch_btree_insert(op, s, &op->keys);
+			ret = bch_btree_insert(op, s);
 			if (ret)
 				goto err;
 
@@ -340,10 +345,9 @@ static void btree_flush_write(struct cache_set *c)
 	 * entry, best is our current candidate and is locked if non NULL:
 	 */
 	struct btree *b, *best = NULL;
-	struct hlist_node *cursor;
 	unsigned iter;
 
-	for_each_cached_btree(b, c, iter, cursor) {
+	for_each_cached_btree(b, c, iter) {
 		if (!down_write_trylock(&b->lock))
 			continue;
 
@@ -435,7 +439,7 @@ static void do_journal_discard(struct cache *ca)
 
 		bio_init(bio);
 		bio->bi_sector		= bucket_to_sector(ca->set,
-							   ca->sb.d[ja->discard_idx]);
+						ca->sb.d[ja->discard_idx]);
 		bio->bi_bdev		= ca->bdev;
 		bio->bi_rw		= REQ_WRITE|REQ_DISCARD;
 		bio->bi_max_vecs	= 1;
@@ -559,6 +563,7 @@ static void journal_write_done(struct closure *cl)
 }
 
 static void journal_write_unlocked(struct closure *cl)
+	__releases(c->journal.lock)
 {
 	struct cache_set *c = container_of(cl, struct cache_set, journal.io.cl);
 	struct cache *ca;
@@ -617,7 +622,7 @@ static void journal_write_unlocked(struct closure *cl)
 
 		bio->bi_end_io	= journal_write_endio;
 		bio->bi_private = w;
-		bio_map(bio, w->data);
+		bch_bio_map(bio, w->data);
 
 		trace_bcache_journal_write(bio);
 		bio_list_add(&list, bio);
@@ -648,6 +653,7 @@ static void journal_write(struct closure *cl)
 }
 
 static void __journal_try_write(struct cache_set *c, bool noflush)
+	__releases(c->journal.lock)
 {
 	struct closure *cl = &c->journal.io.cl;
 
@@ -690,7 +696,7 @@ void bch_journal(struct closure *cl)
 	struct btree_op *op = container_of(cl, struct btree_op, cl);
 	struct cache_set *c = op->c;
 	struct journal_write *w;
-	size_t sectors, nkeys;
+	size_t b, n = ((uint64_t *) op->keys.top) - op->keys.list;
 
 	if (op->type != BTREE_INSERT ||
 	    !CACHE_SYNC(&c->sb))
@@ -718,12 +724,10 @@ void bch_journal(struct closure *cl)
 
 	w = c->journal.cur;
 	w->need_write = true;
-	nkeys = w->data->keys + bch_keylist_nkeys(&op->keys);
-	sectors = __set_blocks(w->data, nkeys, c) * c->sb.block_size;
+	b = __set_blocks(w->data, w->data->keys + n, c);
 
-	if (sectors > min_t(size_t,
-			    c->journal.blocks_free * c->sb.block_size,
-			    PAGE_SECTORS << JSET_BITS)) {
+	if (b * c->sb.block_size > PAGE_SECTORS << JSET_BITS ||
+	    b > c->journal.blocks_free) {
 		/* XXX: If we were inserting so many keys that they won't fit in
 		 * an _empty_ journal write, we'll deadlock. For now, handle
 		 * this in bch_keylist_realloc() - but something to think about.
@@ -739,8 +743,8 @@ void bch_journal(struct closure *cl)
 		continue_at(cl, bch_journal, bcache_wq);
 	}
 
-	memcpy(end(w->data), op->keys.keys, bch_keylist_bytes(&op->keys));
-	w->data->keys += bch_keylist_nkeys(&op->keys);
+	memcpy(end(w->data), op->keys.list, n * sizeof(uint64_t));
+	w->data->keys += n;
 
 	op->journal = &fifo_back(&c->journal.pin);
 	atomic_inc(op->journal);

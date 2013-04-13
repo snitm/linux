@@ -33,9 +33,10 @@ config BCACHE_CLOSURES_DEBUG
 	interface to list them, which makes it possible to see asynchronous
 	operations that get stuck.
 
-config CGROUP_BCACHE
-	bool "Cgroup controls for bcache"
-	depends on BCACHE && BLK_CGROUP
-	---help---
-	TODO
-
+# cgroup code needs to be updated:
+#
+#config CGROUP_BCACHE
+#	bool "Cgroup controls for bcache"
+#	depends on BCACHE && BLK_CGROUP
+#	---help---
+#	TODO

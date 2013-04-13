@@ -1,3 +1,11 @@
+/*
+ * background writeback - scan btree for dirty data and write it to the backing
+ * device
+ *
+ * Copyright 2010, 2011 Kent Overstreet <kent.overstreet@gmail.com>
+ * Copyright 2012 Google, Inc.
+ */
+
 #include "bcache.h"
 #include "btree.h"
 #include "debug.h"
@@ -87,7 +95,7 @@ static unsigned writeback_delay(struct cached_dev *dc, unsigned sectors)
 	    !dc->writeback_percent)
 		return 0;
 
-	return next_delay(&dc->writeback_rate, sectors * 10000000ULL);
+	return bch_next_delay(&dc->writeback_rate, sectors * 10000000ULL);
 }
 
 /* Background writeback */
@@ -110,7 +118,7 @@ static void dirty_init(struct keybuf_key *w)
 	bio->bi_max_vecs	= DIV_ROUND_UP(KEY_SIZE(&w->key), PAGE_SECTORS);
 	bio->bi_private		= w;
 	bio->bi_io_vec		= bio->bi_inline_vecs;
-	bio_map(bio, NULL);
+	bch_bio_map(bio, NULL);
 }
 
 static void refill_dirty(struct closure *cl)
@@ -229,7 +237,7 @@ static void write_dirty_finish(struct closure *cl)
 			atomic_inc(&PTR_BUCKET(dc->disk.c, &w->key, i)->pin);
 
 		pr_debug("clearing %s", pkey(&w->key));
-		bch_btree_insert(&op, dc->disk.c, &op.keys);
+		bch_btree_insert(&op, dc->disk.c);
 		closure_sync(&op.cl);
 
 		atomic_long_inc(op.insert_collision
@@ -341,7 +349,7 @@ static void read_dirty(struct closure *cl)
 		io->bio.bi_rw		= READ;
 		io->bio.bi_end_io	= read_dirty_endio;
 
-		if (bio_alloc_pages(&io->bio, GFP_KERNEL))
+		if (bch_bio_alloc_pages(&io->bio, GFP_KERNEL))
 			goto err_free;
 
 		pr_debug("%s", pkey(&w->key));

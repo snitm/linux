@@ -1,3 +1,9 @@
+/*
+ * Assorted bcache debug code
+ *
+ * Copyright 2010, 2011 Kent Overstreet <kent.overstreet@gmail.com>
+ * Copyright 2012 Google, Inc.
+ */
 
 #include "bcache.h"
 #include "btree.h"
@@ -11,8 +17,6 @@
 #include <linux/seq_file.h>
 
 static struct dentry *debug;
-
-/* Various debug code */
 
 const char *bch_ptr_status(struct cache_set *c, const struct bkey *k)
 {
@@ -78,7 +82,7 @@ struct keyprint_hack bch_pbtree(const struct btree *b)
 {
 	struct keyprint_hack r;
 
-	snprintf(r.s, 40, "%li level %i/%i", PTR_BUCKET_NR(b->c, &b->key, 0),
+	snprintf(r.s, 40, "%zu level %i/%i", PTR_BUCKET_NR(b->c, &b->key, 0),
 		 b->level, b->c->root ? b->c->root->level : -1);
 	return r;
 }
@@ -196,7 +200,7 @@ void bch_data_verify(struct search *s)
 	if (!check)
 		return;
 
-	if (bio_alloc_pages(check, GFP_NOIO))
+	if (bch_bio_alloc_pages(check, GFP_NOIO))
 		goto out_put;
 
 	check->bi_rw		= READ_SYNC;
@@ -213,8 +217,8 @@ void bch_data_verify(struct search *s)
 		if (memcmp(p1 + bv->bv_offset,
 			   p2 + bv->bv_offset,
 			   bv->bv_len))
-			printk(KERN_ERR "bcache (%s): verify failed"
-			       " at sector %llu\n",
+			printk(KERN_ERR
+			       "bcache (%s): verify failed at sector %llu\n",
 			       bdevname(dc->bdev, name),
 			       (uint64_t) s->orig_bio->bi_sector);
 
@@ -405,7 +409,9 @@ void bch_debug_init_cache_set(struct cache_set *c)
 
 #endif
 
-#ifdef CONFIG_BCACHE_DEBUG
+/* Fuzz tester has rotted: */
+#if 0
+
 static ssize_t btree_fuzz(struct kobject *k, struct kobj_attribute *a,
 			  const char *buffer, size_t size)
 {
@@ -480,7 +486,7 @@ static ssize_t btree_fuzz(struct kobject *k, struct kobj_attribute *a,
 			SET_KEY_PTRS(k, 1);
 #endif
 			bch_keylist_push(&op.keys);
-			bch_btree_insert_keys(b, &op, &op.keys);
+			bch_btree_insert_keys(b, &op);
 
 			if (should_split(b) ||
 			    set_blocks(i, b->c) !=
@@ -521,8 +527,8 @@ static ssize_t btree_fuzz(struct kobject *k, struct kobj_attribute *a,
 			     k = bkey_next(k), l = bkey_next(l))
 				if (bkey_cmp(k, l) ||
 				    KEY_SIZE(k) != KEY_SIZE(l))
-					pr_err("key %zi differs: %s "
-					       "!= %s", (uint64_t *) k - i->d,
+					pr_err("key %zi differs: %s != %s",
+					       (uint64_t *) k - i->d,
 					       pkey(k), pkey(l));
 
 			for (j = 0; j < 3; j++) {
@@ -548,7 +554,7 @@ void bch_debug_exit(void)
 int __init bch_debug_init(struct kobject *kobj)
 {
 	int ret = 0;
-#ifdef CONFIG_BCACHE_DEBUG
+#if 0
 	ret = sysfs_create_file(kobj, &ksysfs_fuzz.attr);
 	if (ret)
 		return ret;

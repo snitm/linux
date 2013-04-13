@@ -1,10 +1,8 @@
-
-#include "bcache.h"
-#include "btree.h"
-
-#include <linux/random.h>
-
 /*
+ * Primary bucket allocation code
+ *
+ * Copyright 2012 Google, Inc.
+ *
  * Allocation in bcache is done in terms of buckets:
  *
  * Each bucket has associated an 8 bit gen; this gen corresponds to the gen in
@@ -61,6 +59,11 @@
  * invalidated, and then invalidate them and stick them on the free_inc list -
  * in either lru or fifo order.
  */
+
+#include "bcache.h"
+#include "btree.h"
+
+#include <linux/random.h>
 
 #define MAX_IN_FLIGHT_DISCARDS		8U
 
@@ -226,24 +229,14 @@ static void invalidate_one_bucket(struct cache *ca, struct bucket *b)
 	fifo_push(&ca->free_inc, b - ca->buckets);
 }
 
+#define bucket_prio(b)				\
+	(((unsigned) (b->prio - ca->set->min_prio)) * GC_SECTORS_USED(b))
+
+#define bucket_max_cmp(l, r)	(bucket_prio(l) < bucket_prio(r))
+#define bucket_min_cmp(l, r)	(bucket_prio(l) > bucket_prio(r))
+
 static void invalidate_buckets_lru(struct cache *ca)
 {
-	unsigned bucket_prio(struct bucket *b)
-	{
-		return ((unsigned) (b->prio - ca->set->min_prio)) *
-			GC_SECTORS_USED(b);
-	}
-
-	bool bucket_max_cmp(struct bucket *l, struct bucket *r)
-	{
-		return bucket_prio(l) < bucket_prio(r);
-	}
-
-	bool bucket_min_cmp(struct bucket *l, struct bucket *r)
-	{
-		return bucket_prio(l) > bucket_prio(r);
-	}
-
 	struct bucket *b;
 	ssize_t i;
 

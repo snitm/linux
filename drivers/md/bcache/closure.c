@@ -1,14 +1,15 @@
+/*
+ * Asynchronous refcounty things
+ *
+ * Copyright 2010, 2011 Kent Overstreet <kent.overstreet@gmail.com>
+ * Copyright 2012 Google, Inc.
+ */
 
 #include <linux/debugfs.h>
 #include <linux/module.h>
 #include <linux/seq_file.h>
 
 #include "closure.h"
-
-/*
- * Closure like things
- * See include/linux/closure.h for full documentation
- */
 
 void closure_queue(struct closure *cl)
 {
@@ -333,13 +334,10 @@ static const struct file_operations debug_ops = {
 	.release	= single_release
 };
 
-int __init closure_debug_init(void)
+void __init closure_debug_init(void)
 {
 	debug = debugfs_create_file("closures", 0400, NULL, NULL, &debug_ops);
-	return 0;
 }
-
-module_init(closure_debug_init);
 
 #endif
 

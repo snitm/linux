@@ -1,3 +1,9 @@
+/*
+ * Moving/copying garbage collector
+ *
+ * Copyright 2012 Google, Inc.
+ */
+
 #include "bcache.h"
 #include "btree.h"
 #include "debug.h"
@@ -79,7 +85,7 @@ static void moving_init(struct moving_io *io)
 					       PAGE_SECTORS);
 	bio->bi_private		= &io->s.cl;
 	bio->bi_io_vec		= bio->bi_inline_vecs;
-	bio_map(bio, NULL);
+	bch_bio_map(bio, NULL);
 }
 
 static void write_moving(struct closure *cl)
@@ -153,7 +159,7 @@ static void read_moving(struct closure *cl)
 		bio->bi_rw	= READ;
 		bio->bi_end_io	= read_moving_endio;
 
-		if (bio_alloc_pages(bio, GFP_KERNEL))
+		if (bch_bio_alloc_pages(bio, GFP_KERNEL))
 			goto err;
 
 		pr_debug("%s", pkey(&w->key));
@@ -177,22 +183,22 @@ err:		if (!IS_ERR_OR_NULL(w->private))
 	closure_return(cl);
 }
 
+static bool bucket_cmp(struct bucket *l, struct bucket *r)
+{
+	return GC_SECTORS_USED(l) < GC_SECTORS_USED(r);
+}
+
+static unsigned bucket_heap_top(struct cache *ca)
+{
+	return GC_SECTORS_USED(heap_peek(&ca->heap));
+}
+
 void bch_moving_gc(struct closure *cl)
 {
 	struct cache_set *c = container_of(cl, struct cache_set, gc.cl);
 	struct cache *ca;
 	struct bucket *b;
 	unsigned i;
-
-	bool bucket_cmp(struct bucket *l, struct bucket *r)
-	{
-		return GC_SECTORS_USED(l) < GC_SECTORS_USED(r);
-	}
-
-	unsigned top(struct cache *ca)
-	{
-		return GC_SECTORS_USED(heap_peek(&ca->heap));
-	}
 
 	if (!c->copy_gc_enabled)
 		closure_return(cl);
@@ -214,7 +220,7 @@ void bch_moving_gc(struct closure *cl)
 				sectors_to_move += GC_SECTORS_USED(b);
 				heap_add(&ca->heap, b, bucket_cmp);
 			} else if (bucket_cmp(b, heap_peek(&ca->heap))) {
-				sectors_to_move -= top(ca);
+				sectors_to_move -= bucket_heap_top(ca);
 				sectors_to_move += GC_SECTORS_USED(b);
 
 				ca->heap.data[0] = b;
@@ -227,7 +233,7 @@ void bch_moving_gc(struct closure *cl)
 			sectors_to_move -= GC_SECTORS_USED(b);
 		}
 
-		ca->gc_move_threshold = top(ca);
+		ca->gc_move_threshold = bucket_heap_top(ca);
 
 		pr_debug("threshold %u", ca->gc_move_threshold);
 	}

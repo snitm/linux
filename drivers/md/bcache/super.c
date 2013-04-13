@@ -1,3 +1,10 @@
+/*
+ * bcache setup/teardown code, and some metadata io - read a superblock and
+ * figure out what to do with it.
+ *
+ * Copyright 2010, 2011 Kent Overstreet <kent.overstreet@gmail.com>
+ * Copyright 2012 Google, Inc.
+ */
 
 #include "bcache.h"
 #include "btree.h"
@@ -57,9 +64,11 @@ struct workqueue_struct *bcache_wq;
 
 static void bio_split_pool_free(struct bio_split_pool *p)
 {
+	if (p->bio_split_hook)
+		mempool_destroy(p->bio_split_hook);
+
 	if (p->bio_split)
 		bioset_free(p->bio_split);
-
 }
 
 static int bio_split_pool_init(struct bio_split_pool *p)
@@ -135,7 +144,7 @@ static const char *read_super(struct cache_sb *sb, struct block_device *bdev,
 		goto err;
 
 	err = "Bad UUID";
-	if (is_zero(sb->uuid, 16))
+	if (bch_is_zero(sb->uuid, 16))
 		goto err;
 
 	err = "Unsupported superblock version";
@@ -163,7 +172,7 @@ static const char *read_super(struct cache_sb *sb, struct block_device *bdev,
 		goto out;
 
 	err = "Bad UUID";
-	if (is_zero(sb->set_uuid, 16))
+	if (bch_is_zero(sb->set_uuid, 16))
 		goto err;
 
 	err = "Bad cache device number in set";
@@ -211,7 +220,7 @@ static void __write_super(struct cache_sb *sb, struct bio *bio)
 	bio->bi_sector	= SB_SECTOR;
 	bio->bi_rw	= REQ_SYNC|REQ_META;
 	bio->bi_size	= SB_SIZE;
-	bio_map(bio, NULL);
+	bch_bio_map(bio, NULL);
 
 	out->offset		= cpu_to_le64(sb->offset);
 	out->version		= cpu_to_le64(sb->version);
@@ -325,7 +334,7 @@ static void uuid_io(struct cache_set *c, unsigned long rw,
 
 		bio->bi_end_io	= uuid_endio;
 		bio->bi_private = cl;
-		bio_map(bio, c->uuids);
+		bch_bio_map(bio, c->uuids);
 
 		bch_submit_bbio(bio, c, k, i);
 
@@ -337,7 +346,7 @@ static void uuid_io(struct cache_set *c, unsigned long rw,
 		 pkey(&c->uuid_bucket));
 
 	for (u = c->uuids; u < c->uuids + c->nr_uuids; u++)
-		if (!is_zero(u->uuid, 16))
+		if (!bch_is_zero(u->uuid, 16))
 			pr_debug("Slot %zi: %pU: %s: 1st: %u last: %u inv: %u",
 				 u - c->uuids, u->uuid, u->label,
 				 u->first_reg, u->last_reg, u->invalidated);
@@ -484,7 +493,7 @@ static void prio_io(struct cache *ca, uint64_t bucket, unsigned long rw)
 
 	bio->bi_end_io	= prio_endio;
 	bio->bi_private = ca;
-	bio_map(bio, ca->disk_buckets);
+	bch_bio_map(bio, ca->disk_buckets);
 
 	closure_bio_submit(bio, &ca->prio, ca);
 	closure_sync(cl);
@@ -519,7 +528,8 @@ void bch_prio_write(struct cache *ca)
 	for (i = prio_buckets(ca) - 1; i >= 0; --i) {
 		long bucket;
 		struct prio_set *p = ca->disk_buckets;
-		struct bucket_disk *d = p->data, *end = d + prios_per_bucket(ca);
+		struct bucket_disk *d = p->data;
+		struct bucket_disk *end = d + prios_per_bucket(ca);
 
 		for (b = ca->buckets + i * prios_per_bucket(ca);
 		     b < ca->buckets + ca->sb.nbuckets && d < end;
@@ -530,7 +540,7 @@ void bch_prio_write(struct cache *ca)
 
 		p->next_bucket	= ca->prio_buckets[i + 1];
 		p->magic	= pset_magic(ca);
-		p->csum		= crc64(&p->magic, bucket_bytes(ca) - 8);
+		p->csum		= bch_crc64(&p->magic, bucket_bytes(ca) - 8);
 
 		bucket = bch_bucket_alloc(ca, WATERMARK_PRIO, &cl);
 		BUG_ON(bucket == -1);
@@ -577,7 +587,7 @@ static void prio_read(struct cache *ca, uint64_t bucket)
 
 			prio_io(ca, bucket, READ_SYNC);
 
-			if (p->csum != crc64(&p->magic, bucket_bytes(ca) - 8))
+			if (p->csum != bch_crc64(&p->magic, bucket_bytes(ca) - 8))
 				pr_warn("bad csum reading priorities");
 
 			if (p->magic != pset_magic(ca))
@@ -631,35 +641,6 @@ void bcache_device_stop(struct bcache_device *d)
 		closure_queue(&d->cl);
 }
 
-static void bcache_device_unlink(struct bcache_device *d)
-{
-	unsigned i;
-	struct cache *ca;
-
-	sysfs_remove_link(&d->c->kobj, d->name);
-	sysfs_remove_link(&d->kobj, "cache");
-
-	for_each_cache(ca, d->c, i)
-		bd_unlink_disk_holder(ca->bdev, d->disk);
-}
-
-static void bcache_device_link(struct bcache_device *d, struct cache_set *c,
-			       const char *name)
-{
-	unsigned i;
-	struct cache *ca;
-
-	for_each_cache(ca, d->c, i)
-		bd_link_disk_holder(ca->bdev, d->disk);
-
-	snprintf(d->name, BCACHEDEVNAME_SIZE,
-		 "%s%u", name, d->id);
-
-	WARN(sysfs_create_link(&d->kobj, &c->kobj, "cache") ||
-	     sysfs_create_link(&c->kobj, &d->kobj, d->name),
-	     "Couldn't create device <-> cache set symlinks");
-}
-
 static void bcache_device_detach(struct bcache_device *d)
 {
 	lockdep_assert_held(&bch_register_lock);
@@ -674,8 +655,6 @@ static void bcache_device_detach(struct bcache_device *d)
 
 		atomic_set(&d->detaching, 0);
 	}
-
-	bcache_device_unlink(d);
 
 	d->c->devices[d->id] = NULL;
 	closure_put(&d->c->caching);
@@ -692,6 +671,17 @@ static void bcache_device_attach(struct bcache_device *d, struct cache_set *c,
 	c->devices[id] = d;
 
 	closure_get(&c->caching);
+}
+
+static void bcache_device_link(struct bcache_device *d, struct cache_set *c,
+			       const char *name)
+{
+	snprintf(d->name, BCACHEDEVNAME_SIZE,
+		 "%s%u", name, d->id);
+
+	WARN(sysfs_create_link(&d->kobj, &c->kobj, "cache") ||
+	     sysfs_create_link(&c->kobj, &d->kobj, d->name),
+	     "Couldn't create device <-> cache set symlinks");
 }
 
 static void bcache_device_free(struct bcache_device *d)
@@ -760,8 +750,6 @@ static int bcache_device_init(struct bcache_device *d, unsigned block_size)
 	set_bit(QUEUE_FLAG_NONROT,	&d->disk->queue->queue_flags);
 	set_bit(QUEUE_FLAG_DISCARD,	&d->disk->queue->queue_flags);
 
-	blk_queue_flush(q, REQ_FLUSH|REQ_FUA);
-
 	return 0;
 }
 
@@ -796,7 +784,6 @@ void bch_cached_dev_run(struct cached_dev *dc)
 	}
 
 	add_disk(d->disk);
-	bd_link_disk_holder(dc->bdev, dc->disk.disk);
 #if 0
 	char *env[] = { "SYMLINK=label" , NULL };
 	kobject_uevent_env(&disk_to_dev(d->disk)->kobj, KOBJ_CHANGE, env);
@@ -815,6 +802,9 @@ static void cached_dev_detach_finish(struct work_struct *w)
 
 	BUG_ON(!atomic_read(&dc->disk.detaching));
 	BUG_ON(atomic_read(&dc->count));
+
+	sysfs_remove_link(&dc->disk.c->kobj, dc->disk.name);
+	sysfs_remove_link(&dc->disk.kobj, "cache");
 
 	mutex_lock(&bch_register_lock);
 
@@ -878,8 +868,8 @@ int bch_cached_dev_attach(struct cached_dev *dc, struct cache_set *c)
 
 	if (dc->sb.block_size < c->sb.block_size) {
 		/* Will die */
-		pr_err("Couldn't attach %s: block size "
-		       "less than set's block size", buf);
+		pr_err("Couldn't attach %s: block size less than set's block size",
+		       buf);
 		return -EINVAL;
 	}
 
@@ -910,7 +900,7 @@ int bch_cached_dev_attach(struct cached_dev *dc, struct cache_set *c)
 	sysfs_remove_file(&dc->kobj, &sysfs_attach);
 	 */
 
-	if (is_zero(u->uuid, 16)) {
+	if (bch_is_zero(u->uuid, 16)) {
 		struct closure cl;
 		closure_init_stack(&cl);
 
@@ -930,6 +920,7 @@ int bch_cached_dev_attach(struct cached_dev *dc, struct cache_set *c)
 	}
 
 	bcache_device_attach(&dc->disk, c, u - c->uuids);
+	bcache_device_link(&dc->disk, c, "bdev");
 	list_move(&dc->list, &c->cached_devs);
 	calc_cached_dev_sectors(c);
 
@@ -947,7 +938,6 @@ int bch_cached_dev_attach(struct cached_dev *dc, struct cache_set *c)
 	}
 
 	bch_cached_dev_run(dc);
-	bcache_device_link(&dc->disk, c, "bdev");
 
 	pr_info("Caching %s as %s on set %pU",
 		bdevname(dc->bdev, buf), dc->disk.disk->disk_name,
@@ -971,7 +961,6 @@ static void cached_dev_free(struct closure *cl)
 
 	mutex_lock(&bch_register_lock);
 
-	bd_unlink_disk_holder(dc->bdev, dc->disk.disk);
 	bcache_device_free(&dc->disk);
 	list_del(&dc->list);
 
@@ -1110,7 +1099,8 @@ static void flash_dev_flush(struct closure *cl)
 {
 	struct bcache_device *d = container_of(cl, struct bcache_device, cl);
 
-	bcache_device_unlink(d);
+	sysfs_remove_link(&d->c->kobj, d->name);
+	sysfs_remove_link(&d->kobj, "cache");
 	kobject_del(&d->kobj);
 	continue_at(cl, flash_dev_free, system_wq);
 }
@@ -1930,6 +1920,7 @@ static int __init bcache_init(void)
 	mutex_init(&bch_register_lock);
 	init_waitqueue_head(&unregister_wait);
 	register_reboot_notifier(&reboot);
+	closure_debug_init();
 
 	bcache_major = register_blkdev(0, "bcache");
 	if (bcache_major < 0)

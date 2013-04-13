@@ -1,18 +1,35 @@
+/*
+ * Code for working with individual keys, and sorted sets of keys with in a
+ * btree node
+ *
+ * Copyright 2012 Google, Inc.
+ */
 
 #include "bcache.h"
 #include "btree.h"
 #include "debug.h"
 
 #include <linux/random.h>
+#include <linux/prefetch.h>
 
 /* Keylists */
 
+void bch_keylist_copy(struct keylist *dest, struct keylist *src)
+{
+	*dest = *src;
+
+	if (src->list == src->d) {
+		size_t n = (uint64_t *) src->top - src->d;
+		dest->top = (struct bkey *) &dest->d[n];
+		dest->list = dest->d;
+	}
+}
+
 int bch_keylist_realloc(struct keylist *l, int nptrs, struct cache_set *c)
 {
-	size_t oldsize = bch_keylist_nkeys(l);
-	size_t newsize = oldsize + 2 + nptrs;
-	uint64_t *old_keys = l->keys_p == l->inline_keys ? NULL : l->keys_p;
-	uint64_t *new_keys;
+	unsigned oldsize = (uint64_t *) l->top - l->list;
+	unsigned newsize = oldsize + 2 + nptrs;
+	uint64_t *new;
 
 	/* The journalling code doesn't handle the case where the keys to insert
 	 * is bigger than an empty write: If we just return -ENOMEM here,
@@ -28,23 +45,24 @@ int bch_keylist_realloc(struct keylist *l, int nptrs, struct cache_set *c)
 	    roundup_pow_of_two(oldsize) == newsize)
 		return 0;
 
-	new_keys = krealloc(old_keys, sizeof(uint64_t) * newsize, GFP_NOIO);
+	new = krealloc(l->list == l->d ? NULL : l->list,
+		       sizeof(uint64_t) * newsize, GFP_NOIO);
 
-	if (!new_keys)
+	if (!new)
 		return -ENOMEM;
 
-	if (!old_keys)
-		memcpy(new_keys, l->inline_keys, sizeof(uint64_t) * oldsize);
+	if (l->list == l->d)
+		memcpy(new, l->list, sizeof(uint64_t) * KEYLIST_INLINE);
 
-	l->keys_p = new_keys;
-	l->top_p = new_keys + oldsize;
+	l->list = new;
+	l->top = (struct bkey *) (&l->list[oldsize]);
 
 	return 0;
 }
 
 struct bkey *bch_keylist_pop(struct keylist *l)
 {
-	struct bkey *k = l->keys;
+	struct bkey *k = l->bottom;
 
 	if (k == l->top)
 		return NULL;
@@ -53,15 +71,6 @@ struct bkey *bch_keylist_pop(struct keylist *l)
 		k = bkey_next(k);
 
 	return l->top = k;
-}
-
-void bch_keylist_pop_front(struct keylist *l)
-{
-	l->top_p -= bkey_u64s(l->keys);
-
-	memmove(l->keys,
-		bkey_next(l->keys),
-		bch_keylist_bytes(l));
 }
 
 /* Pointer validation */
@@ -153,9 +162,9 @@ bool bch_ptr_bad(struct btree *b, const struct bkey *k)
 #ifdef CONFIG_BCACHE_EDEBUG
 bug:
 	mutex_unlock(&b->c->bucket_lock);
-	btree_bug(b, "inconsistent pointer %s: bucket %li pin %i "
-		  "prio %i gen %i last_gc %i mark %llu gc_gen %i", pkey(k),
-		  PTR_BUCKET_NR(b->c, k, i), atomic_read(&g->pin),
+	btree_bug(b,
+"inconsistent pointer %s: bucket %zu pin %i prio %i gen %i last_gc %i mark %llu gc_gen %i",
+		  pkey(k), PTR_BUCKET_NR(b->c, k, i), atomic_read(&g->pin),
 		  g->prio, g->gen, g->last_gc, GC_MARK(g), g->gc_gen);
 	return true;
 #endif
@@ -874,7 +883,7 @@ struct bkey *bch_btree_iter_next(struct btree_iter *iter)
 		iter->data->k = bkey_next(iter->data->k);
 
 		if (iter->data->k > iter->data->end) {
-			__WARN();
+			WARN_ONCE(1, "bset was corrupt!\n");
 			iter->data->k = iter->data->end;
 		}
 
@@ -1018,7 +1027,7 @@ static void __btree_sort(struct btree *b, struct btree_iter *iter,
 
 	if (!start) {
 		spin_lock(&b->c->sort_time_lock);
-		time_stats_update(&b->c->sort_time, start_time);
+		bch_time_stats_update(&b->c->sort_time, start_time);
 		spin_unlock(&b->c->sort_time_lock);
 	}
 }
@@ -1041,7 +1050,8 @@ void bch_btree_sort_partial(struct btree *b, unsigned start)
 		for (i = start; i <= b->nsets; i++)
 			keys += b->sets[i].data->keys;
 
-		order = roundup_pow_of_two(__set_bytes(b->sets->data, keys)) / PAGE_SIZE;
+		order = roundup_pow_of_two(__set_bytes(b->sets->data,
+						       keys)) / PAGE_SIZE;
 		if (order)
 			order = ilog2(order);
 	}
@@ -1067,7 +1077,7 @@ void bch_btree_sort_into(struct btree *b, struct btree *new)
 	btree_mergesort(b, new->sets->data, &iter, false, true);
 
 	spin_lock(&b->c->sort_time_lock);
-	time_stats_update(&b->c->sort_time, start_time);
+	bch_time_stats_update(&b->c->sort_time, start_time);
 	spin_unlock(&b->c->sort_time_lock);
 
 	bkey_copy_key(&new->key, &b->key);
