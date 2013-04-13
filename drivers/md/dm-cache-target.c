@@ -61,35 +61,6 @@ static void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
-/*
- * There are a couple of places where we let a bio run, but want to do some
- * work before calling it's endio function.  We do this by temporarily
- * changing the endio fn.
- */
-struct hook_info {
-	bio_end_io_t *bi_end_io;
-	void *bi_private;
-};
-
-static void hook_bio(struct hook_info *h, struct bio *bio,
-		     bio_end_io_t *bi_end_io,
-		     void *bi_private)
-{
-	h->bi_end_io = bio->bi_end_io;
-	h->bi_private = bio->bi_private;
-
-	bio->bi_end_io = bi_end_io;
-	bio->bi_private = bi_private;
-}
-
-static void unhook_bio(struct hook_info *h, struct bio *bio)
-{
-	bio->bi_end_io = h->bi_end_io;
-	bio->bi_private = h->bi_private;
-}
-
-/*----------------------------------------------------------------*/
-
 #define PRISON_CELLS 1024
 #define MIGRATION_POOL_SIZE 128
 #define COMMIT_PERIOD HZ
@@ -238,7 +209,7 @@ struct per_bio_data {
 	 */
 	struct cache *cache;
 	dm_cblock_t cblock;
-	struct hook_info hook_info;
+	bio_end_io_t *saved_bi_end_io;
 	struct dm_bio_details bio_details;
 };
 
@@ -255,7 +226,6 @@ struct dm_cache_migration {
 	bool writeback:1;
 	bool demote:1;
 	bool promote:1;
-	bool requeue_holder:1;
 
 	struct dm_bio_prison_cell *old_ocell;
 	struct dm_bio_prison_cell *new_ocell;
@@ -423,7 +393,7 @@ static int get_cell(struct cache *cache,
 	return r;
 }
 
-/*----------------------------------------------------------------*/
+ /*----------------------------------------------------------------*/
 
 static bool is_dirty(struct cache *cache, dm_cblock_t b)
 {
@@ -449,7 +419,6 @@ static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbl
 }
 
 /*----------------------------------------------------------------*/
-
 static bool block_size_is_power_of_two(struct cache *cache)
 {
 	return cache->sectors_per_block_shift >= 0;
@@ -686,7 +655,7 @@ static void defer_writethrough_bio(struct cache *cache, struct bio *bio)
 static void writethrough_endio(struct bio *bio, int err)
 {
 	struct per_bio_data *pb = get_per_bio_data(bio, PB_DATA_SIZE_WT);
-	unhook_bio(&pb->hook_info, bio);
+	bio->bi_end_io = pb->saved_bi_end_io;
 
 	if (err) {
 		bio_endio(bio, err);
@@ -698,7 +667,7 @@ static void writethrough_endio(struct bio *bio, int err)
 
 	/*
 	 * We can't issue this bio directly, since we're in interrupt
-	 * context.  So it gets put on a bio list for processing by the
+	 * context.  So it get's put on a bio list for processing by the
 	 * worker thread.
 	 */
 	defer_writethrough_bio(pb->cache, bio);
@@ -717,8 +686,9 @@ static void remap_to_origin_then_cache(struct cache *cache, struct bio *bio,
 
 	pb->cache = cache;
 	pb->cblock = cblock;
-	hook_bio(&pb->hook_info, bio, writethrough_endio, NULL);
+	pb->saved_bi_end_io = bio->bi_end_io;
 	dm_bio_record(&pb->bio_details, bio);
+	bio->bi_end_io = writethrough_endio;
 
 	remap_to_origin_clear_discard(pb->cache, bio, oblock);
 }
@@ -805,8 +775,6 @@ static void migration_success_pre_commit(struct dm_cache_migration *mg)
 	unsigned long flags;
 	struct cache *cache = mg->cache;
 
-	/* FIXME: what if mg->err? */
-
 	if (mg->writeback) {
 		cell_defer(cache, mg->old_ocell, false);
 		clear_dirty(cache, mg->old_oblock, mg->cblock);
@@ -861,12 +829,7 @@ static void migration_success_post_commit(struct dm_cache_migration *mg)
 			cleanup_migration(mg);
 
 	} else {
-		if (mg->requeue_holder)
-			cell_defer(cache, mg->new_ocell, true);
-		else {
-			bio_endio(mg->new_ocell->holder, 0);
-			cell_defer(cache, mg->new_ocell, false);
-		}
+		cell_defer(cache, mg->new_ocell, true);
 		clear_dirty(cache, mg->new_oblock, mg->cblock);
 		cleanup_migration(mg);
 	}
@@ -915,43 +878,6 @@ static void issue_copy_real(struct dm_cache_migration *mg)
 		migration_failure(mg);
 }
 
-static void overwrite_endio(struct bio *bio, int err)
-{
-	struct dm_cache_migration *mg = bio->bi_private;
-	struct cache *cache = mg->cache;
-	size_t pb_data_size = get_per_bio_data_size(cache);
-	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
-	unsigned long flags;
-
-	if (err)
-		mg->err = true;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	list_add_tail(&mg->list, &cache->completed_migrations);
-	unhook_bio(&pb->hook_info, bio);
-	mg->requeue_holder = false;
-	spin_unlock_irqrestore(&cache->lock, flags);
-
-	wake_worker(cache);
-}
-
-static void issue_overwrite(struct dm_cache_migration *mg, struct bio *bio)
-{
-	struct cache *cache = mg->cache;
-	size_t pb_data_size = get_per_bio_data_size(cache);
-	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
-
-	hook_bio(&pb->hook_info, bio, overwrite_endio, mg);
-	remap_to_cache_dirty(mg->cache, bio, mg->new_oblock, mg->cblock);
-	generic_make_request(bio);
-}
-
-static bool bio_writes_complete_block(struct cache *cache, struct bio *bio)
-{
-	return (bio_data_dir(bio) == WRITE) &&
-		(bio->bi_size == (cache->sectors_per_block << SECTOR_SHIFT));
-}
-
 static void avoid_copy(struct dm_cache_migration *mg)
 {
 	atomic_inc(&mg->cache->stats.copies_avoided);
@@ -966,17 +892,8 @@ static void issue_copy(struct dm_cache_migration *mg)
 	if (mg->writeback || mg->demote)
 		avoid = !is_dirty(cache, mg->cblock) ||
 			is_discarded_oblock(cache, mg->old_oblock);
-	else {
-		struct bio *bio = mg->new_ocell->holder;
-
+	else
 		avoid = is_discarded_oblock(cache, mg->new_oblock);
-#if 0
-		if (!avoid && bio_writes_complete_block(cache, bio)) {
-			issue_overwrite(mg, bio);
-			return;
-		}
-#endif
-	}
 
 	avoid ? avoid_copy(mg) : issue_copy_real(mg);
 }
@@ -1067,7 +984,6 @@ static void promote(struct cache *cache, struct prealloc *structs,
 	mg->writeback = false;
 	mg->demote = false;
 	mg->promote = true;
-	mg->requeue_holder = true;
 	mg->cache = cache;
 	mg->new_oblock = oblock;
 	mg->cblock = cblock;
@@ -1089,7 +1005,6 @@ static void writeback(struct cache *cache, struct prealloc *structs,
 	mg->writeback = true;
 	mg->demote = false;
 	mg->promote = false;
-	mg->requeue_holder = true;
 	mg->cache = cache;
 	mg->old_oblock = oblock;
 	mg->cblock = cblock;
@@ -1113,7 +1028,6 @@ static void demote_then_promote(struct cache *cache, struct prealloc *structs,
 	mg->writeback = false;
 	mg->demote = true;
 	mg->promote = true;
-	mg->requeue_holder = true;
 	mg->cache = cache;
 	mg->old_oblock = old_oblock;
 	mg->new_oblock = new_oblock;
@@ -1895,37 +1809,7 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 
 static struct kmem_cache *migration_cache;
 
-#define NOT_CORE_OPTION 1
-
-static int process_config_option(struct cache *cache, const char *key, const char *value)
-{
-	unsigned long tmp;
-
-	if (!strcasecmp(key, "migration_threshold")) {
-		if (kstrtoul(value, 10, &tmp))
-			return -EINVAL;
-
-		cache->migration_threshold = tmp;
-		return 0;
-	}
-
-	return NOT_CORE_OPTION;
-}
-
-static int set_config_value(struct cache *cache, const char *key, const char *value)
-{
-	int r = process_config_option(cache, key, value);
-
-	if (r == NOT_CORE_OPTION)
-		r = policy_set_config_value(cache->policy, key, value);
-
-	if (r)
-		DMWARN("bad config value: %s = %s\n", key, value);
-
-	return r;
-}
-
-static int set_config_values(struct cache *cache, int argc, const char **argv)
+static int set_config_values(struct dm_cache_policy *p, int argc, const char **argv)
 {
 	int r = 0;
 
@@ -1935,9 +1819,12 @@ static int set_config_values(struct cache *cache, int argc, const char **argv)
 	}
 
 	while (argc) {
-		r = set_config_value(cache, argv[0], argv[1]);
-		if (r)
-			break;
+		r = policy_set_config_value(p, argv[0], argv[1]);
+		if (r) {
+			DMWARN("policy_set_config_value failed: key = '%s', value = '%s'",
+			       argv[0], argv[1]);
+			return r;
+		}
 
 		argc -= 2;
 		argv += 2;
@@ -1949,6 +1836,8 @@ static int set_config_values(struct cache *cache, int argc, const char **argv)
 static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 			       char **error)
 {
+	int r;
+
 	cache->policy =	dm_cache_policy_create(ca->policy_name,
 					       cache->cache_size,
 					       cache->origin_sectors,
@@ -1958,7 +1847,14 @@ static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 		return -ENOMEM;
 	}
 
-	return 0;
+	r = set_config_values(cache->policy, ca->policy_argc, ca->policy_argv);
+	if (r) {
+		*error = "Error setting cache policy's config values";
+		dm_cache_policy_destroy(cache->policy);
+		cache->policy = NULL;
+	}
+
+	return r;
 }
 
 /*
@@ -1990,7 +1886,7 @@ static sector_t calculate_discard_block_size(sector_t cache_block_size,
 	return discard_block_size;
 }
 
-#define DEFAULT_MIGRATION_THRESHOLD 2048
+#define DEFAULT_MIGRATION_THRESHOLD (2048 * 100)
 
 static int cache_create(struct cache_args *ca, struct cache **result)
 {
@@ -2015,7 +1911,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	ti->discards_supported = true;
 	ti->discard_zeroes_data_unsupported = true;
 
-	cache->features = ca->features;
+	memcpy(&cache->features, &ca->features, sizeof(cache->features));
 	ti->per_bio_data_size = get_per_bio_data_size(cache);
 
 	cache->callbacks.congested_fn = cache_is_congested;
@@ -2052,15 +1948,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	r = create_cache_policy(cache, ca, error);
 	if (r)
 		goto bad;
-
 	cache->policy_nr_args = ca->policy_argc;
-	cache->migration_threshold = DEFAULT_MIGRATION_THRESHOLD;
-
-	r = set_config_values(cache, ca->policy_argc, ca->policy_argv);
-	if (r) {
-		*error = "Error setting cache policy's config values";
-		goto bad;
-	}
 
 	cmd = dm_cache_metadata_open(cache->metadata_dev->bdev,
 				     ca->block_size, may_format,
@@ -2079,6 +1967,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	INIT_LIST_HEAD(&cache->quiesced_migrations);
 	INIT_LIST_HEAD(&cache->completed_migrations);
 	INIT_LIST_HEAD(&cache->need_commit_migrations);
+	cache->migration_threshold = DEFAULT_MIGRATION_THRESHOLD;
 	atomic_set(&cache->nr_migrations, 0);
 	init_waitqueue_head(&cache->migration_wait);
 
@@ -2628,6 +2517,23 @@ err:
 	DMEMIT("Error");
 }
 
+#define NOT_CORE_OPTION 1
+
+static int process_config_option(struct cache *cache, char **argv)
+{
+	unsigned long tmp;
+
+	if (!strcasecmp(argv[0], "migration_threshold")) {
+		if (kstrtoul(argv[1], 10, &tmp))
+			return -EINVAL;
+
+		cache->migration_threshold = tmp;
+		return 0;
+	}
+
+	return NOT_CORE_OPTION;
+}
+
 /*
  * Supports <key> <value>.
  *
@@ -2635,12 +2541,17 @@ err:
  */
 static int cache_message(struct dm_target *ti, unsigned argc, char **argv)
 {
+	int r;
 	struct cache *cache = ti->private;
 
 	if (argc != 2)
 		return -EINVAL;
 
-	return set_config_value(cache, argv[0], argv[1]);
+	r = process_config_option(cache, argv);
+	if (r == NOT_CORE_OPTION)
+		return policy_set_config_value(cache->policy, argv[0], argv[1]);
+
+	return r;
 }
 
 static int cache_iterate_devices(struct dm_target *ti,
