@@ -234,7 +234,7 @@ struct per_bio_data {
 	/*
 	 * writethrough fields.  These MUST remain at the end of this
 	 * structure and the 'cache' member must be the first as it
-	 * is used to determine the offsetof the writethrough fields.
+	 * is used to determined the offsetof the writethrough fields.
 	 */
 	struct cache *cache;
 	dm_cblock_t cblock;
@@ -458,7 +458,6 @@ static bool block_size_is_power_of_two(struct cache *cache)
 static dm_block_t block_div(dm_block_t b, uint32_t n)
 {
 	do_div(b, n);
-
 	return b;
 }
 
@@ -473,7 +472,6 @@ static dm_dblock_t oblock_to_dblock(struct cache *cache, dm_oblock_t oblock)
 		discard_blocks >>= cache->sectors_per_block_shift;
 
 	b = block_div(b, discard_blocks);
-
 	return to_dblock(b);
 }
 
@@ -937,8 +935,7 @@ static void overwrite_endio(struct bio *bio, int err)
 
 static void issue_overwrite(struct dm_cache_migration *mg, struct bio *bio)
 {
-	struct cache *cache = mg->cache;
-	size_t pb_data_size = get_per_bio_data_size(cache);
+	size_t pb_data_size = get_per_bio_data_size(mg->cache);
 	struct per_bio_data *pb = get_per_bio_data(bio, pb_data_size);
 
 	hook_bio(&pb->hook_info, bio, overwrite_endio, mg);
@@ -1531,6 +1528,7 @@ static void do_worker(struct work_struct *ws)
 static void do_waker(struct work_struct *ws)
 {
 	struct cache *cache = container_of(to_delayed_work(ws), struct cache, waker);
+	policy_tick(cache->policy);
 	wake_worker(cache);
 	queue_delayed_work(cache->wq, &cache->waker, COMMIT_PERIOD);
 }
@@ -2274,6 +2272,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	r = policy_map(cache->policy, block, false, can_migrate, discarded_block,
 		       bio, &lookup_result);
 	if (r == -EWOULDBLOCK) {
+		// FIXME: we should check to see if there's any spare migration bandwidth here
 		cell_defer(cache, cell, true);
 		return DM_MAPIO_SUBMITTED;
 
